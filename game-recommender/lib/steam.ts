@@ -1,0 +1,167 @@
+// Steam 商店公开接口数据层：搜索、详情、评测。无需 API Key。
+// 带内存缓存与并发限制，避免触发商店限流。
+
+const UA = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" };
+const CACHE_TTL = 10 * 60 * 1000;
+const cache = new Map<string, { t: number; data: unknown }>();
+
+async function fetchJson<T>(url: string, timeoutMs = 12000, retries = 1): Promise<T | null> {
+  const hit = cache.get(url);
+  if (hit && Date.now() - hit.t < CACHE_TTL) return hit.data as T;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const res = await fetch(url, { headers: UA, signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as T;
+      cache.set(url, { t: Date.now(), data });
+      return data;
+    } catch {
+      if (attempt === retries) return null;
+      await new Promise((r) => setTimeout(r, 600));
+    }
+  }
+  return null;
+}
+
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let index = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (index < items.length) {
+      const i = index++;
+      results[i] = await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+// ---------- 类型 ----------
+
+interface StoreSearchItem {
+  type?: string;
+  id?: number;
+  name?: string;
+}
+
+export interface StoreSearchResult {
+  id: number;
+  name: string;
+}
+
+export interface SteamAppData {
+  type?: string;
+  name?: string;
+  header_image?: string;
+  short_description?: string;
+  is_free?: boolean;
+  developers?: string[];
+  publishers?: string[];
+  price_overview?: {
+    final: number;
+    discount_percent: number;
+    final_formatted: string;
+  };
+  platforms?: { windows: boolean; mac: boolean; linux: boolean };
+  metacritic?: { score: number };
+  categories?: { id: number; description: string }[];
+  genres?: { id: string; description: string }[];
+  release_date?: { coming_soon: boolean; date: string };
+}
+
+// ---------- 搜索 ----------
+
+export async function searchStore(query: string, count = 8): Promise<StoreSearchResult[]> {
+  const url = `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(
+    query
+  )}&l=schinese&cc=cn`;
+  const data = await fetchJson<{ items?: StoreSearchItem[] }>(url);
+  if (!data?.items) return [];
+  return data.items
+    .filter((it): it is StoreSearchItem & { id: number } => it.type === "app" && typeof it.id === "number")
+    .slice(0, count)
+    .map((it) => ({ id: it.id, name: it.name?.trim() || String(it.id) }));
+}
+
+// ---------- 详情 ----------
+
+// Steam 的 filters 参数很怪：name/type/short_description 等单独用会返回空，
+// 必须走 basic 分组（含 name/type/short_description/header_image/is_free）。
+const DETAIL_FILTERS =
+  "basic,genres,categories,developers,publishers,release_date,price_overview,platforms,metacritic";
+
+export async function getAppData(appid: number): Promise<SteamAppData | null> {
+  const url = `https://store.steampowered.com/api/appdetails?appids=${appid}&l=schinese&cc=cn&filters=${DETAIL_FILTERS}`;
+  const data = await fetchJson<Record<string, { success: boolean; data?: SteamAppData }>>(url);
+  const entry = data?.[String(appid)];
+  if (!entry?.success || !entry.data) return null;
+  return entry.data;
+}
+
+export async function getAppDataBatch(appids: number[]): Promise<Map<number, SteamAppData>> {
+  const map = new Map<number, SteamAppData>();
+  await mapLimit(appids, 6, async (id) => {
+    const data = await getAppData(id);
+    if (data) map.set(id, data);
+  });
+  return map;
+}
+
+// ---------- 评测 ----------
+
+export interface ReviewSummary {
+  total_positive: number;
+  total_negative: number;
+  total_reviews: number;
+}
+
+export async function getReviewSummary(appid: number): Promise<ReviewSummary | null> {
+  const url = `https://store.steampowered.com/appreviews/${appid}?json=1&language=all&purchase_type=all&num_per_page=0`;
+  const data = await fetchJson<{ success: number; query_summary?: ReviewSummary }>(url, 8000, 0);
+  if (data?.success !== 1 || !data.query_summary) return null;
+  return data.query_summary;
+}
+
+export async function getReviewSummaries(appids: number[]): Promise<Map<number, ReviewSummary>> {
+  const map = new Map<number, ReviewSummary>();
+  await mapLimit(appids, 5, async (id) => {
+    const summary = await getReviewSummary(id);
+    if (summary) map.set(id, summary);
+  });
+  return map;
+}
+
+// ---------- 推导 ----------
+
+const PLAYER_MODE_IDS = new Set([1, 2, 9, 24, 27, 36, 37, 38, 39, 49]);
+
+export function derivePlayerModes(app: SteamAppData): string[] {
+  const modes: string[] = [];
+  for (const category of app.categories ?? []) {
+    if (!PLAYER_MODE_IDS.has(category.id)) continue;
+    const label = category.description.trim();
+    if (label && !modes.includes(label)) modes.push(label);
+  }
+  return modes;
+}
+
+export function parseReleaseTimestamp(dateStr?: string): number | null {
+  if (!dateStr) return null;
+  const cn = dateStr.match(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+  if (cn) return Date.UTC(+cn[1], +cn[2] - 1, +cn[3]);
+  const parsed = Date.parse(dateStr);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+export function reviewLabel(positiveRate: number, total: number): string {
+  if (total < 50) return "评测较少";
+  if (positiveRate >= 95 && total >= 500) return "好评如潮";
+  if (positiveRate >= 80) return "特别好评";
+  if (positiveRate >= 70) return "多半好评";
+  if (positiveRate >= 40) return "褒贬不一";
+  if (positiveRate >= 20) return "多半差评";
+  return "差评如潮";
+}
