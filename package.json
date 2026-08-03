@@ -1,0 +1,10 @@
+{
+  "name": "ai-games-rec-deploy",
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "build": "cd game-recommender && pnpm install --frozen-lockfile && pnpm build",
+    "start": "cd game-recommender && pnpm start",
+    "dev": "cd game-recommender && pnpm dev"
+  }
+}
