@@ -5,3 +5,7 @@
 next-env.d.ts
 .env*
 *.tsbuildinfo
+.cache/
+
+*.log
+*.pid

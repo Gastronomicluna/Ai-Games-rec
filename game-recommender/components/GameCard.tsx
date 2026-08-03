@@ -81,7 +81,7 @@ export default function GameCard({ game, onSelect }: { game: Game; onSelect: (g:
             </span>
           ) : game.metacritic ? (
             <span className="flex items-center gap-1 text-brand-2-strong">
-              <ThumbsUp size={13} /> M 站 {game.metacritic}
+              <ThumbsUp size={13} /> 媒体 {game.metacritic}
             </span>
           ) : (
             <span>评分较少</span>

@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { searchStore } from "@/lib/steam";
-import { searchRawg, isRawgConfigured } from "@/lib/rawg";
+import { searchWikidata } from "@/lib/wikidata";
 
 export const runtime = "nodejs";
 
 interface SearchResult {
-  steamId: number;
+  id: string;
   name: string;
 }
 
@@ -14,45 +14,30 @@ const CACHE_TTL = 2 * 60 * 1000;
 
 export async function GET(request: NextRequest) {
   const q = request.nextUrl.searchParams.get("q")?.trim();
-  if (!q || q.length < 2) {
-    return NextResponse.json({ results: [] });
-  }
-
+  if (!q || q.length < 2) return NextResponse.json({ results: [] });
   const cacheKey = q.toLowerCase();
   const cached = cache.get(cacheKey);
-  if (cached && Date.now() - cached.ts < CACHE_TTL) {
-    return NextResponse.json({ results: cached.results });
-  }
+  if (cached && Date.now() - cached.ts < CACHE_TTL) return NextResponse.json({ results: cached.results });
 
   try {
-    // Always search both in parallel - Steam is fast, RAWG supplements
-    const [steamResults, rawgResults] = await Promise.all([
+    const [steamResults, wikidataResults] = await Promise.all([
       searchStore(q, 10),
-      isRawgConfigured()
-        ? Promise.race([
-            searchRawg(q, 8),
-            new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 20000)),
-          ]).catch(() => [])
-        : Promise.resolve([] as Awaited<ReturnType<typeof searchRawg>>),
+      searchWikidata(q, 10).catch(() => []),
     ]);
-
     const seen = new Set<string>();
     const results: SearchResult[] = [];
-
-    for (const r of steamResults) {
-      if (r.name && r.id && !seen.has(r.name.toLowerCase())) {
-        seen.add(r.name.toLowerCase());
-        results.push({ steamId: r.id, name: r.name });
-      }
+    for (const result of steamResults) {
+      const key = result.name.toLowerCase();
+      if (!result.name || seen.has(key)) continue;
+      seen.add(key);
+      results.push({ id: `steam-${result.id}`, name: result.name });
     }
-
-    for (const g of rawgResults) {
-      if (g.name && !seen.has(g.name.toLowerCase())) {
-        seen.add(g.name.toLowerCase());
-        results.push({ steamId: g.id, name: g.name });
-      }
+    for (const game of wikidataResults) {
+      const key = game.name.toLowerCase();
+      if (!game.name || seen.has(key)) continue;
+      seen.add(key);
+      results.push({ id: `wikidata-${game.id}`, name: game.name });
     }
-
     const final = results.slice(0, 10);
     cache.set(cacheKey, { results: final, ts: Date.now() });
     return NextResponse.json({ results: final });

@@ -5,7 +5,7 @@ import ChatDock from "@/components/ChatDock";
 import GameModal from "@/components/GameModal";
 import HomeView from "@/components/HomeView";
 import ResultsView from "@/components/ResultsView";
-import type { ChatMessage, Game, Platform, RecommendResponse } from "@/lib/types";
+import type { ChatMessage, Game, Platform, PreviousRecommendation, RecommendResponse, ReleaseFilter } from "@/lib/types";
 
 const STORAGE_KEY = "wanshenme-session-v3";
 
@@ -14,6 +14,8 @@ interface SessionState {
   games: Game[];
   excludedIds: number[];
   platforms: Platform[];
+  favoriteGames?: string[];
+  releaseFilter?: ReleaseFilter;
   count: number;
 }
 
@@ -49,7 +51,7 @@ function loadSession(): SessionState | null {
     ? parsed.excludedIds.filter((id): id is number => Number.isInteger(id) && id > 0)
     : [];
   if (messages.length === 0) return null;
-  return { messages, games, excludedIds, platforms, count: typeof parsed.count === "number" ? parsed.count : 6 };
+  return { messages, games, excludedIds, platforms, favoriteGames: Array.isArray(parsed.favoriteGames) ? parsed.favoriteGames.filter((value): value is string => typeof value === "string").slice(0, 8) : [], releaseFilter: parsed.releaseFilter === "last1" || parsed.releaseFilter === "last3" || parsed.releaseFilter === "last5" || parsed.releaseFilter === "before2020" || parsed.releaseFilter === "before2010" ? parsed.releaseFilter : "all", count: typeof parsed.count === "number" ? parsed.count : 6 };
   } catch {
     return null;
   }
@@ -59,8 +61,16 @@ export default function Page() {
   const [view, setView] = useState<"home" | "results">("home");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [games, setGames] = useState<Game[]>([]);
-    const [excludedIds, setExcludedIds] = useState<number[]>([]);
+  const gamesRef = useRef(games);
+  gamesRef.current = games;
+  const [excludedIds, setExcludedIds] = useState<number[]>([]);
   const [platforms, setPlatforms] = useState<Platform[]>([]);
+  const [favoriteGames, setFavoriteGames] = useState<string[]>([]);
+  const [releaseFilter, setReleaseFilter] = useState<ReleaseFilter>("all");
+  const releaseFilterRef = useRef<ReleaseFilter>(releaseFilter);
+  releaseFilterRef.current = releaseFilter;
+  const platformsRef = useRef(platforms);
+  platformsRef.current = platforms;
   const [count, setCount] = useState(6);
   const countRef = useRef(count);
   countRef.current = count;
@@ -90,16 +100,17 @@ export default function Page() {
     if (messages.length === 0) {
       localStorage.removeItem(STORAGE_KEY);
     } else {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ messages, games, excludedIds, platforms, count }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ messages, games, excludedIds, platforms, favoriteGames, releaseFilter, count }));
     }
-  }, [messages, games, excludedIds, platforms, count, hydrated]);
+  }, [messages, games, excludedIds, platforms, favoriteGames, releaseFilter, count, hydrated]);
 
   const requestRecommend = useCallback(
     async (
       nextMessages: ChatMessage[],
       nextExcluded: number[],
       appendExcluded: boolean,
-      rollbackMessages?: ChatMessage[]
+      rollbackMessages?: ChatMessage[],
+      contextGames: Game[] = []
     ): Promise<boolean> => {
       abortRef.current?.abort();
       const controller = new AbortController();
@@ -112,7 +123,22 @@ export default function Page() {
         const response = await fetch("/api/recommend", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: nextMessages, excludeIds: nextExcluded, platforms, count: countRef.current }),
+          body: JSON.stringify({
+            messages: nextMessages,
+            excludeIds: nextExcluded,
+            platforms: platformsRef.current,
+            count: countRef.current,
+            releaseFilter: releaseFilterRef.current,
+            previousGames: contextGames.slice(0, 40).map((game): PreviousRecommendation => ({
+              id: game.id,
+              name: game.name,
+              platformNames: game.platformNames,
+              genres: game.genres,
+              tags: game.tags,
+              playerModes: game.playerModes,
+              reason: game.reason,
+            })),
+          }),
           signal: controller.signal,
         });
         const data = await response.json().catch(() => null);
@@ -148,14 +174,32 @@ export default function Page() {
     async (text: string) => {
       const nextMessages: ChatMessage[] = [...messages, { role: "user", content: text }];
       setMessages(nextMessages);
-      return requestRecommend(nextMessages, [], false, messages);
+      return requestRecommend(nextMessages, [], false, messages, gamesRef.current);
     },
     [messages, requestRecommend]
   );
 
   const handleRefreshBatch = useCallback(() => {
-    void requestRecommend(messages, excludedIds, true);
+    void requestRecommend(messages, excludedIds, true, undefined, gamesRef.current);
   }, [messages, excludedIds, requestRecommend]);
+
+  const handleApplyPreferences = useCallback((nextFavorites: string[], nextPlatforms: Platform[], nextReleaseFilter: ReleaseFilter) => {
+    const favoriteText = nextFavorites.length > 0 ? `我喜欢《${nextFavorites.join("》《")}》。` : "我没有指定喜欢的游戏。";
+    const nextMessages: ChatMessage[] = [
+      ...messages,
+      {
+        role: "user",
+        content: `请以本次更新后的偏好为准，忽略之前的喜好游戏选择。${favoriteText}`,
+      },
+    ];
+    platformsRef.current = nextPlatforms;
+    releaseFilterRef.current = nextReleaseFilter;
+    setPlatforms(nextPlatforms);
+    setReleaseFilter(nextReleaseFilter);
+    setFavoriteGames(nextFavorites);
+    setMessages(nextMessages);
+    void requestRecommend(nextMessages, [], false, messages, gamesRef.current);
+  }, [messages, requestRecommend]);
 
   const handleReset = useCallback(() => {
     requestVersionRef.current += 1;
@@ -174,7 +218,7 @@ export default function Page() {
   return (
     <>
       {view === "home" ? (
-        <HomeView loading={loading} error={error} platforms={platforms} onPlatformsChange={setPlatforms} count={count} onCountChange={setCount} onSubmit={handleSend} />
+        <HomeView loading={loading} error={error} platforms={platforms} onPlatformsChange={setPlatforms} favoriteGames={favoriteGames} onFavoriteGamesChange={setFavoriteGames} releaseFilter={releaseFilter} onReleaseFilterChange={setReleaseFilter} count={count} onCountChange={setCount} onSubmit={handleSend} />
       ) : (
         <div className="flex min-h-screen flex-col">
           <div className="flex-1">
@@ -182,7 +226,15 @@ export default function Page() {
               games={games}
               loading={loading}
               error={error}
-              count={count} onCountChange={(c: number) => { setCount(c); handleRefreshBatch(); }}
+              count={count}
+              onCountChange={(c: number) => { countRef.current = c; setCount(c); void requestRecommend(messages, excludedIds, true, undefined, gamesRef.current); }}
+              favoriteGames={favoriteGames}
+              onFavoriteGamesChange={setFavoriteGames}
+              platforms={platforms}
+              onPlatformsChange={setPlatforms}
+              releaseFilter={releaseFilter}
+              onReleaseFilterChange={setReleaseFilter}
+              onApplyPreferences={handleApplyPreferences}
               onRefreshBatch={handleRefreshBatch}
               onSelectGame={setSelected}
             />

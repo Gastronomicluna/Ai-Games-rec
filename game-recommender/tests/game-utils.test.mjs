@@ -5,7 +5,7 @@ import { sortGames } from "../lib/game-utils.ts";
 function game(id, { rating = null, metacritic = null, price = null, release = null, playtime = null } = {}) {
   return {
     id,
-    source: "rawg",
+    source: "wikidata",
     steamAppId: null,
     name: `Game ${id}`,
     headerImage: "",
@@ -22,7 +22,7 @@ function game(id, { rating = null, metacritic = null, price = null, release = nu
     publishers: [],
     platforms: { windows: true, mac: false, linux: false },
     metacritic,
-    review: rating === null ? null : { label: "fixture", positiveRate: rating, total: 10, source: "rawg" },
+    review: rating === null ? null : { label: "fixture", positiveRate: rating, total: 10, source: "wikidata" },
     playtimeHours: playtime,
     storeUrl: "https://example.com",
     storeName: "商店",

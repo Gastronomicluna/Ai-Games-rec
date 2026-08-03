@@ -112,7 +112,7 @@ export default function GameModal({ game, onClose }: { game: Game; onClose: () =
               )}
               {game.metacritic !== null && (
                 <div>
-                  <p className="text-xs text-ink/45">Metacritic</p>
+                  <p className="text-xs text-ink/45">媒体评分</p>
                   <p className="text-sm font-semibold">{game.metacritic}</p>
                 </div>
               )}

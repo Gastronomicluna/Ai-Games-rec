@@ -24,7 +24,7 @@ export async function GET(request: NextRequest) {
     }
   } catch {}
 
-  // Fallback: DNS-over-HTTPS for blocked CDN hosts (e.g. media.rawg.io)
+  // Fallback: DNS-over-HTTPS for blocked image CDN hosts (e.g. upload.wikimedia.org)
   try {
     const result = await dohFetch(url, 15000);
     return new NextResponse(new Uint8Array(result.buffer), { status: 200, headers: { "Content-Type": result.contentType, "Cache-Control": `public, max-age=${CACHE_MAX_AGE}, immutable` } });

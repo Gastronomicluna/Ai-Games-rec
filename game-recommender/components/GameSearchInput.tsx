@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, Search, X } from "lucide-react";
 
 interface SearchResult {
-  steamId: number;
+  id: string;
   name: string;
 }
 
@@ -127,7 +127,7 @@ export default function GameSearchInput({
           className="absolute left-0 right-0 top-full z-30 mt-1 max-h-56 overflow-y-auto rounded-lg border border-ink/10 bg-white shadow-lg"
         >
           {results.map((r, i) => (
-            <li key={r.steamId}>
+            <li key={r.id}>
               <button
                 onMouseDown={(e) => {
                   e.preventDefault();

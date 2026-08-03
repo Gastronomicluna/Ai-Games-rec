@@ -3,6 +3,7 @@ import { request as httpsRequest } from "node:https";
 import type { LookupFunction } from "node:net";
 
 const DOH_PROVIDERS = [
+  "https://doh.pub/resolve",
   "https://dns.google/resolve",
   "https://cloudflare-dns.com/dns-query",
 ];

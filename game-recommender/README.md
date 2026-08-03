@@ -2,17 +2,17 @@
 
 > 告诉 AI 你现在的游戏口味，从真实游戏库里为你挑出下一款心头好。
 
-一个基于 LLM + RAWG + Steam 的游戏推荐网站。用户用自然语言描述需求，系统从真实游戏数据库中检索候选，再由 AI 排序并撰写个性化推荐理由。
+一个基于 LLM + GameBrain + Steam 的游戏推荐网站。用户用自然语言描述需求，系统从真实游戏数据库中检索候选，再由 AI 排序并撰写个性化推荐理由。
 
 ## 功能
 
 - **对话式推荐**：自然语言描述需求，边聊边改，持续迭代
-- **真实游戏数据**：从 RAWG（48 万+ 游戏）和 Steam 实时检索，不编造
+- **真实游戏数据**：从 GameBrain 和 Steam 检索，Wikidata 作为备用，不编造
 - **多平台支持**：Steam / PSN / NS 平台偏好切换，自动筛选对应平台游戏
 - **灵活数量**：每批可选 6 / 10 / 15 / 20 款，按匹配度、评分、价格等多维度排序
-- **喜好搜索**：输入游戏名实时搜索并添加为偏好，支持 Steam + RAWG 双源
+- **喜好搜索**：输入游戏名实时搜索并添加为偏好，支持 GameBrain + Steam 双源，Wikidata 兜底
 - **详情弹窗**：站内查看游戏完整信息，附商店跳转链接
-- **图片代理**：DNS-over-HTTPS 代理 RAWG 封面图，国内网络正常加载
+- **图片代理**：服务端代理 Wikipedia/Wikimedia 图片，国内网络正常加载
 - **会话持久化**：浏览器 localStorage，刷新不丢失
 - **响应式**：桌面端优先，移动端适配
 
@@ -25,13 +25,13 @@
 | 样式 | Tailwind CSS 4 |
 | 图标 | Lucide React |
 | AI | OpenAI 兼容接口（DeepSeek 等） |
-| 游戏数据 | RAWG API + Steam Store API（公开） |
+| 游戏数据 | GameBrain API + Steam Store API，Wikidata 备用 |
 | 包管理 | pnpm |
 
 ## 推荐流水线
 
 ```
-用户输入 → LLM生成搜索计划 → RAWG/Steam并行搜索候选
+用户输入 → LLM生成搜索计划 → GameBrain语义分页召回候选
     → 平台过滤 → LLM评分排序 → 数据补全 → 输出推荐列表
 ```
 
@@ -53,9 +53,8 @@ cp .env.example .env.local
 # 编辑 .env.local，填入你的 API Key
 # AI_BASE_URL=   # OpenAI 兼容中转地址
 # AI_API_KEY=    # API Key
-# AI_MODEL=      # 推理模型（如 deepseek-v4-pro）
+# AI_MODEL=      # 主模型（如 deepseek-v4-flash）
 # AI_FAST_MODEL= # 快模型（如 deepseek-v4-flash）
-# RAWG_API_KEY=  # https://rawg.io/apidocs 免费注册
 
 # 启动开发服务器
 pnpm dev
@@ -71,7 +70,7 @@ pnpm start
 ## 验证
 
 ```bash
-pnpm test          # 单元测试（游戏排序 + RAWG API）
+pnpm test          # 单元测试（游戏排序 + Wikidata 客户端）
 pnpm typecheck     # TypeScript 类型检查
 pnpm build         # 生产构建
 ```
@@ -82,7 +81,7 @@ pnpm build         # 生产构建
 app/
   api/
     recommend/     # POST - AI 推荐（长时运行，max 120s）
-    search-games/  # GET  - 游戏搜索（Steam + RAWG 并行，2min 缓存）
+    search-games/  # GET  - 喜好搜索（Steam + Wikidata，避免消耗GameBrain额度）
     image-proxy/   # GET  - 图片代理（支持 DNS-over-HTTPS）
   page.tsx         # 主页面（状态管理 + localStorage 持久化）
   layout.tsx       # 根布局
@@ -99,7 +98,8 @@ components/
 
 lib/
   recommend.ts   # 推荐核心：搜索计划 → 候选搜集 → AI 排序 → 补全
-  rawg.ts        # RAWG API 客户端（含 DNS-over-HTTPS 回退）
+  gamebrain.ts   # GameBrain客户端（串行限流、额度感知、7天磁盘缓存）
+  wikidata.ts    # Wikidata备用客户端
   steam.ts       # Steam Store API 客户端（商店搜索、详情、评价）
   ai.ts          # LLM 调用封装（OpenAI 兼容）
   doh-fetch.ts   # DNS-over-HTTPS 通用工具
@@ -108,7 +108,8 @@ lib/
 
 tests/
   game-utils.test.mjs  # 排序逻辑测试
-  rawg.test.mjs        # RAWG API 契约测试
+  gamebrain.test.mjs   # GameBrain分页、限流与缓存测试
+  wikidata.test.mjs   # Wikidata备用源测试
 ```
 
 ## 部署
@@ -118,3 +119,13 @@ tests/
 ⚠️ **注意**：AI 推荐调用耗时较长（50-120 秒），需确保部署平台支持长时运行的 API 函数。Vercel 免费版超时仅 10 秒，需升级 Pro（$20/月）或使用 Railway（$5/月，支持 300s 超时）。
 
 环境变量需在部署平台配置，`.env.local` 不会被提交到 Git。
+
+## GameBrain 免费套餐约束
+
+- 仅用于个人、爱好和非商业项目
+- 每天 50 tokens（每月 1500）
+- 1 个并发请求、每分钟 60 次请求
+- 页面必须提供 GameBrain 回链（首页和结果页已添加）
+- 推荐请求使用语义搜索分页：6/10款通常2页，15/20款最多4页
+- 相同查询和分页结果持久缓存7天，缓存命中不消耗额度
+- .cache/ 已加入 .gitignore

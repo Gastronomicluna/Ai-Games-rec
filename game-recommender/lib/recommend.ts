@@ -1,18 +1,15 @@
-// Recommendation pipeline: search planning -> verified RAWG/Steam candidates -> AI ranking -> enriched result data.
+// Recommendation pipeline: search planning -> verified Wikidata/Steam candidates -> AI ranking -> enriched result data.
 
-import { chatCompletion, extractJson } from "./ai";
+import { chatCompletionJson } from "./ai";
+import { getSimilarGameBrain, searchGameBrain, isGameBrainConfigured, type GameBrainGame, GameBrainQuotaError, GameBrainUnavailableError } from "./gamebrain";
+import { matchesPlatformFilter, platformPreferenceText, releaseFilterText, searchPlanKey, transcript, matchesReleaseFilter } from "./recommend-preferences";
 import {
-  getRawgGamesBatch,
-  getRawgStoreLinksBatch,
-  inferRawgPlayerModes,
-  isRawgConfigured,
-  rawgHasSteam,
-  rawgPlatformNames,
-  searchRawg,
-  type RawgGameDetail,
-  type RawgGameSummary,
-  type RawgStoreLink,
-} from "./rawg";
+  getWikipediaEnrichment,
+  searchWikidataBatch,
+  wikidataPageUrl,
+  type WikidataGame,
+  type WikipediaEnrichment,
+} from "./wikidata";
 import {
   derivePlayerModes,
   getAppDataBatch,
@@ -23,14 +20,15 @@ import {
   type ReviewSummary,
   type SteamAppData,
 } from "./steam";
-import type { ChatMessage, Game, Platform, RecommendResponse } from "./types";
+import type { ChatMessage, Game, Platform, PreviousRecommendation, RecommendResponse, ReleaseFilter } from "./types";
 
-const RAWG_CANDIDATE_CAP = 40;
+const WIKIDATA_CANDIDATE_CAP = 40;
 const STEAM_CANDIDATE_CAP = 50;
 const SEARCH_PLAN_CACHE_TTL = 15 * 60 * 1000;
 const searchPlanCache = new Map<string, { t: number; plan: SearchPlan }>();
 
 interface SearchPlan {
+  query: string;
   titles: string[];
   keywords: string[];
 }
@@ -38,13 +36,12 @@ interface SearchPlan {
 interface Candidate {
   id: number;
   name: string;
-  rawg: RawgGameSummary | null;
+  gamebrain: GameBrainGame | null;
+  wikidata: WikidataGame | null;
   steamId: number | null;
   steam: SteamAppData | null;
-}
-
-function transcript(messages: ChatMessage[]): string {
-  return messages.map((message) => `${message.role === "user" ? "鐢ㄦ埛" : "鍔╂墜"}锛?{message.content}`).join("\n");
+  matchedPlatformNames: string[];
+  similarToReference: boolean;
 }
 
 function uniqueTerms(values: unknown[], limit: number): string[] {
@@ -62,56 +59,87 @@ function uniqueTerms(values: unknown[], limit: number): string[] {
   return result;
 }
 
-function searchPlanKey(messages: ChatMessage[]): string {
-  return messages.filter((message) => message.role === "user").map((message) => message.content.trim()).join("\n");
-}
-
 function shouldMatchSteam(messages: ChatMessage[], platforms?: Platform[]): boolean {
-  // Explicit platform selection overrides text-based detection
-  if (platforms && platforms.length > 0) {
-    return platforms.includes("steam");
-  }
-  const userText = messages.filter((m) => m.role === "user").map((m) => m.content).join(" ");
-  return !/(nintendo|switch|playstation|\bps[345]\b|xbox|涓绘満鐙崰|鎵嬫父|鎵嬫満娓告垙|android|ios)/i.test(userText);
+  if (platforms && platforms.length > 0) return platforms.includes("steam");
+  const userText = messages.filter((message) => message.role === "user").map((message) => message.content).join(" ");
+  return !/(nintendo|switch|playstation|\bps[345]\b|xbox|主机独占|手游|手机游戏|android|ios)/i.test(userText);
 }
 
-async function buildSearchPlan(messages: ChatMessage[]): Promise<SearchPlan> {
-  const cacheKey = searchPlanKey(messages);
+async function buildSearchPlan(messages: ChatMessage[], platforms: Platform[], previousGames: PreviousRecommendation[], releaseFilter: ReleaseFilter): Promise<SearchPlan> {
+  const cacheKey = `${searchPlanKey(messages, platforms)}\nrelease:${releaseFilter}\nprevious:${previousGames.map((game) => `${game.id}:${game.name}`).join("|")}`;
   const cached = searchPlanCache.get(cacheKey);
   if (cached && Date.now() - cached.t < SEARCH_PLAN_CACHE_TTL) return cached.plan;
-  const system = `You plan searches for a Chinese game recommendation product backed by RAWG and Steam. Read the full conversation and propose real games likely to satisfy the user. Every title is verified through a real game API before recommendation, so never invent games.
+
+  const system = `You plan searches for a Chinese game recommendation product backed by Wikidata, Wikipedia, and Steam. Read the full conversation and propose real games likely to satisfy the user. Every title is verified through a real data source before recommendation, so never invent games.
 Requirements:
-- titles: 15-20 specific standalone full games, using their official English names whenever possible
+- query: one compact English search phrase, 5-15 words, containing reference game names and desired traits; do not write a sentence and do not use the phrase "similar to"
+- titles: 8-10 specific standalone full games for fallback only, using their official English names whenever possible
 - Prefer precise titles such as "It Takes Two" or "Portal 2", not abstract genre phrases
 - Do not include demos, playtests, soundtracks, friend passes, dedicated servers, DLC, or companion apps
-- Include multiple platforms when the user did not explicitly request PC only
-- Cover varied prices, release years, popularity levels, and gameplay approaches while staying relevant
-- If the user names a favorite game, focus on similar alternatives instead of merely repeating it
-- keywords: 3-5 short genre, theme, or mechanic phrases for RAWG fallback search
-- Output JSON only: {"titles":["..."],"keywords":["..."]}`;
+- Include multiple platforms when the user did not explicitly select a platform
+- Treat games explicitly marked as favorites as the strongest taste signal
+- Do not recommend a favorite game itself; recommend alternatives sharing the most relevant traits
+- The selected platform preference is a hard availability constraint when specified
+- keywords: 3-5 short English genre, theme, or mechanic phrases for fallback search
+- Output JSON only: {"query":"Hades beginner friendly action roguelike","titles":["..."],"keywords":["..."]}`;
 
-  const output = await chatCompletion(
-    [
-      { role: "system", content: system },
-      { role: "user", content: transcript(messages) },
-    ],
-    { maxTokens: 2200, temperature: 0.4, model: process.env.AI_FAST_MODEL }
-  );
-
-  const parsed = extractJson<{ titles?: unknown[]; keywords?: unknown[] }>(output);
-  const titles = uniqueTerms(parsed.titles ?? [], 20);
+  let parsed: { query?: unknown; titles?: unknown[]; keywords?: unknown[] };
+  try {
+    parsed = await chatCompletionJson<{ query?: unknown; titles?: unknown[]; keywords?: unknown[] }>(
+      [
+        { role: "system", content: system },
+        { role: "user", content: `Selected platforms: ${platformPreferenceText(platforms)}\nRelease preference: ${releaseFilterText(releaseFilter)}\n\nConversation:\n${transcript(messages)}\n\nPreviously recommended games (use these to understand what to revise or avoid):\n${JSON.stringify(previousGames)}` },
+      ],
+      { maxTokens: 4000, temperature: 0.3, model: process.env.AI_FAST_MODEL }
+    );
+  } catch (error) {
+    console.warn("[recommend] search plan fallback:", error instanceof Error ? error.message : error);
+    const latestUser = messages.filter((message) => message.role === "user").at(-1)?.content ?? "game recommendations";
+    const fallbackQuery = latestUser
+      .replace(/我喜欢|请推荐|推荐|游戏|只要|平台|最近一年|近1年|近3年|近5年|2020年前|2010年前/g, " ")
+      .replace(/射击/g, " shooter ")
+      .replace(/动作/g, " action ")
+      .replace(/角色扮演|RPG/gi, " role playing ")
+      .replace(/单人/g, " single player ")
+      .replace(/多人|联机/g, " multiplayer ")
+      .replace(/合作/g, " co-op ")
+      .replace(/回合制/g, " turn based ")
+      .replace(/现代/g, " modern ")
+      .replace(/战斗/g, " combat ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 160) || "video games";
+    const releaseHint = releaseFilter === "last1" ? " released 2025 or newer" : releaseFilter === "last3" ? " released 2023 or newer" : releaseFilter === "last5" ? " released 2021 or newer" : releaseFilter === "before2020" ? " released before 2020" : releaseFilter === "before2010" ? " released before 2010" : "";
+    return { query: fallbackQuery + releaseHint, titles: [], keywords: [] };
+  }
+  const query = typeof parsed.query === "string" && parsed.query.trim() ? parsed.query.trim().slice(0, 180) : uniqueTerms(parsed.titles ?? [], 3).join(" ");
+  const titles = uniqueTerms(parsed.titles ?? [], 10);
   const keywords = uniqueTerms(parsed.keywords ?? [], 5);
-  searchPlanCache.set(cacheKey, { t: Date.now(), plan: { titles, keywords } });
-  return { titles, keywords };
+  searchPlanCache.set(cacheKey, { t: Date.now(), plan: { query, titles, keywords } });
+  return { query, titles, keywords };
 }
+
 function isLikelyStandaloneName(name: string): boolean {
-  return !/(friend[?'s]* pass|demo|playtest|soundtrack|dedicated server|benchmark|artbook|companion|editor|test server)/i.test(name);
+  return !/(friend[?'s]* pass|demo|playtest|soundtrack|dedicated server|benchmark|artbook|companion|editor|test server|\bdlc\b|season pass)/i.test(name);
 }
 
 function isLikelyStandaloneSteamGame(app: SteamAppData): boolean {
   return app.type === "game" && Boolean(app.name && app.header_image) && isLikelyStandaloneName(app.name ?? "");
 }
 
+function normalizeGameName(name: string): string {
+  return name.normalize("NFKD").toLocaleLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function pickSteamSearchMatch(name: string, results: { id: number; name: string }[]): number | null {
+  const target = normalizeGameName(name);
+  if (!target) return null;
+  const match = results.find((result) => {
+    const candidate = normalizeGameName(result.name);
+    return candidate === target || (target.length >= 8 && candidate.includes(target)) || (candidate.length >= 8 && target.includes(candidate));
+  });
+  return match?.id ?? null;
+}
 
 function addUniqueId(ids: number[], seen: Set<number>, excluded: Set<number>, id: number, cap: number) {
   if (ids.length >= cap || seen.has(id) || excluded.has(id)) return;
@@ -119,31 +147,112 @@ function addUniqueId(ids: number[], seen: Set<number>, excluded: Set<number>, id
   ids.push(id);
 }
 
-const PLATFORM_MAP: Record<Platform, RegExp> = {
-  steam: /pc|windows/i,
-  psn: /playstation/i,
-  ns: /nintendo/i,
+const GAMEBRAIN_PLATFORM_KEYS: Record<Platform, string[]> = {
+  steam: ["pc"],
+  psn: ["playstation_4", "playstation_5"],
+  ns: ["nintendo_switch"],
 };
 
-function matchesPlatformFilter(game: RawgGameSummary, platforms: Platform[]): boolean {
-  if (platforms.length === 0) return true;
-  const names = rawgPlatformNames(game).join(" ");
-  return platforms.some((p) => PLATFORM_MAP[p].test(names));
+const PLATFORM_DISPLAY_NAMES: Record<Platform, string> = {
+  steam: "Windows / Steam",
+  psn: "PlayStation",
+  ns: "Nintendo Switch",
+};
+
+function referenceGameNames(messages: ChatMessage[]): string[] {
+  const names: string[] = [];
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    for (const match of message.content.matchAll(/《([^》]{1,80})》/g)) {
+      const name = match[1].trim();
+      if (name && !names.some((value) => value.toLocaleLowerCase() === name.toLocaleLowerCase())) names.push(name);
+    }
+  }
+  return names.slice(0, 2);
 }
 
-async function gatherRawgCandidates(plan: SearchPlan, excludeIds: number[], includeSteam: boolean, platforms: Platform[], cap = 30): Promise<Candidate[]> {
-  if (!isRawgConfigured()) return [];
+async function gatherGameBrainCandidates(
+  plan: SearchPlan,
+  excludeIds: number[],
+  platforms: Platform[],
+  count: number,
+  messages: ChatMessage[],
+  releaseFilter: ReleaseFilter
+): Promise<Candidate[]> {
+  const target = Math.min(40, Math.max(count + 10, count * 2));
+  const platformKeys = Array.from(new Set(platforms.flatMap((platform) => GAMEBRAIN_PLATFORM_KEYS[platform])));
+  const references = referenceGameNames(messages);
+  const referenceKeys = new Set(references.map((name) => normalizeGameName(name)));
+  const releaseHint = releaseFilter === "last1" ? " released 2025 or newer" : releaseFilter === "last3" ? " released 2023 or newer" : releaseFilter === "last5" ? " released 2021 or newer" : releaseFilter === "before2020" ? " released before 2020" : releaseFilter === "before2010" ? " released before 2010" : "";
+  const naturalQuery = (plan.query.replace(/Nintendo Switch|PlayStation|Steam|Windows|PC/gi, " ").replace(/\s+/g, " ").trim() + releaseHint).trim();
+  const queries = references.length > 0
+    ? [references.join(" "), ...(naturalQuery && normalizeGameName(naturalQuery) !== normalizeGameName(references.join(" ")) ? [naturalQuery] : [])]
+    : [naturalQuery || plan.query];
+  const branchTarget = Math.min(20, Math.ceil(target / queries.length) + 5);
+  const games: GameBrainGame[] = [];
+  const similarIds = new Set<number>();
+  for (let queryIndex = 0; queryIndex < queries.length; queryIndex++) {
+    const branchGames = await searchGameBrain(queries[queryIndex], platformKeys, branchTarget);
+    games.push(...branchGames);
+    if (queryIndex === 0 && references.length > 0) {
+      const seed = branchGames.find((game) => normalizeGameName(game.name) === normalizeGameName(references[0]));
+      if (seed) {
+        try {
+          for (const similar of await getSimilarGameBrain(seed.id, 10)) similarIds.add(similar.id);
+        } catch (error) {
+          if (!(error instanceof GameBrainUnavailableError || error instanceof GameBrainQuotaError)) throw error;
+          console.warn("[recommend] Similar Games fallback:", error instanceof Error ? error.message : error);
+        }
+      }
+    }
+  }
+  const uniqueGames = new Map<number, GameBrainGame>();
+  for (const game of games) if (!uniqueGames.has(game.id)) uniqueGames.set(game.id, game);
+  const mergedGames = Array.from(uniqueGames.values()).sort((a, b) => Number(similarIds.has(b.id)) - Number(similarIds.has(a.id)));
+  const excluded = new Set(excludeIds);
+  const filtered = mergedGames.filter((game) => !excluded.has(game.id) && isLikelyStandaloneName(game.name) && matchesReleaseFilter(game.year, releaseFilter) && !referenceKeys.has(normalizeGameName(game.name)));
+  const shouldVerifySteam = platforms.length === 0 || platforms.includes("steam");
+  const steamSearches = shouldVerifySteam
+    ? await Promise.all(filtered.map((game) => searchStore(game.name, 3)))
+    : filtered.map(() => []);
+  const possibleSteamIds = filtered.map((game, index) => pickSteamSearchMatch(game.name, steamSearches[index] ?? []));
+  const steamDetails = await getAppDataBatch(possibleSteamIds.filter((id): id is number => id !== null));
+  const matchedPlatformNames = platforms.map((platform) => PLATFORM_DISPLAY_NAMES[platform]);
 
-  const searches = [
-    ...plan.titles.map((term) => ({ term, count: 2 })),
-    ...plan.keywords.map((term) => ({ term, count: 5 })),
-  ];
-  const resultSets = await Promise.all(searches.map((item) => searchRawg(item.term, item.count)));
+  return filtered
+    .map((game, index): Candidate => {
+      const possibleSteamId = possibleSteamIds[index];
+      const steam = possibleSteamId ? steamDetails.get(possibleSteamId) ?? null : null;
+      const validSteam = steam && isLikelyStandaloneSteamGame(steam) ? steam : null;
+      return {
+        id: game.id,
+        name: game.name,
+        gamebrain: game,
+        wikidata: null,
+        steamId: validSteam ? possibleSteamId : null,
+        steam: validSteam,
+        matchedPlatformNames,
+        similarToReference: similarIds.has(game.id),
+      };
+    })
+    .filter((candidate) => !platforms.includes("steam") || candidate.steamId !== null || platforms.length > 1);
+}
+
+async function gatherWikidataCandidates(
+  plan: SearchPlan,
+  excludeIds: number[],
+  includeSteam: boolean,
+  platforms: Platform[],
+  cap = WIKIDATA_CANDIDATE_CAP,
+  releaseFilter: ReleaseFilter = "all"
+): Promise<Candidate[]> {
+  const searches = plan.titles.map((query) => ({ query, limit: 3 }));
+  const resultSets = await searchWikidataBatch(searches);
   const excluded = new Set(excludeIds);
   const seen = new Set<number>();
   const ids: number[] = [];
-  const summaryMap = new Map<number, RawgGameSummary>();
-  for (const set of resultSets) for (const game of set) summaryMap.set(game.id, game);
+  const gameMap = new Map<number, WikidataGame>();
+  for (const set of resultSets) for (const game of set) gameMap.set(game.id, game);
 
   for (let index = 0; index < plan.titles.length; index++) {
     const first = resultSets[index]?.[0];
@@ -153,27 +262,27 @@ async function gatherRawgCandidates(plan: SearchPlan, excludeIds: number[], incl
     for (const game of set) addUniqueId(ids, seen, excluded, game.id, cap);
   }
 
-  const summaries = ids.map((id) => summaryMap.get(id)).filter((game): game is RawgGameSummary => Boolean(game?.name && isLikelyStandaloneName(game.name) && matchesPlatformFilter(game, platforms)));
-  const steamSearches = includeSteam
-    ? await Promise.all(summaries.map((game) => (rawgHasSteam(game) ? searchStore(game.name, 3) : Promise.resolve([]))))
-    : summaries.map(() => []);
+  const consoleOnly = platforms.length > 0 && !platforms.includes("steam");
+  const games = ids
+    .map((id) => gameMap.get(id))
+    .filter((game): game is WikidataGame => Boolean(game?.name && isLikelyStandaloneName(game.name) && matchesReleaseFilter(game.releaseDate, releaseFilter)))
+    .filter((game) => !consoleOnly || matchesPlatformFilter(game.platforms, platforms));
+
+  const steamSearches = includeSteam ? await Promise.all(games.map((game) => searchStore(game.name, 3))) : games.map(() => []);
   const steamIds = steamSearches.map((set) => set[0]?.id).filter((id): id is number => typeof id === "number");
   const steamDetails = await getAppDataBatch(Array.from(new Set(steamIds)));
 
-  return summaries.map((rawg, index) => {
-    const possibleSteamId = steamSearches[index]?.[0]?.id ?? null;
-    const steam = possibleSteamId ? steamDetails.get(possibleSteamId) ?? null : null;
-    return {
-      id: rawg.id,
-      name: rawg.name,
-      rawg,
-      steamId: steam && isLikelyStandaloneSteamGame(steam) ? possibleSteamId : null,
-      steam: steam && isLikelyStandaloneSteamGame(steam) ? steam : null,
-    };
-  });
+  return games
+    .map((wikidata, index): Candidate => {
+      const possibleSteamId = pickSteamSearchMatch(wikidata.name, steamSearches[index] ?? []);
+      const steam = possibleSteamId ? steamDetails.get(possibleSteamId) ?? null : null;
+      const validSteam = steam && isLikelyStandaloneSteamGame(steam) ? steam : null;
+      return { id: wikidata.id, name: wikidata.name, gamebrain: null, wikidata, steamId: validSteam ? possibleSteamId : null, steam: validSteam, matchedPlatformNames: wikidata.platforms, similarToReference: false };
+    })
+    .filter((candidate) => matchesPlatformFilter(candidate.wikidata!.platforms, platforms, candidate.steamId !== null));
 }
 
-async function gatherSteamCandidates(plan: SearchPlan, excludeIds: number[], cap = 40): Promise<Candidate[]> {
+async function gatherSteamCandidates(plan: SearchPlan, excludeIds: number[], cap = STEAM_CANDIDATE_CAP, releaseFilter: ReleaseFilter = "all"): Promise<Candidate[]> {
   const searches = [
     ...plan.titles.map((term) => ({ term, count: 3 })),
     ...plan.keywords.map((term) => ({ term, count: 6 })),
@@ -182,114 +291,104 @@ async function gatherSteamCandidates(plan: SearchPlan, excludeIds: number[], cap
   const excluded = new Set(excludeIds);
   const seen = new Set<number>();
   const ids: number[] = [];
-
   for (let index = 0; index < plan.titles.length; index++) {
     const first = resultSets[index]?.[0];
     if (first) addUniqueId(ids, seen, excluded, first.id, cap);
   }
-  for (const set of resultSets) {
-    for (const result of set) addUniqueId(ids, seen, excluded, result.id, cap);
-  }
+  for (const set of resultSets) for (const result of set) addUniqueId(ids, seen, excluded, result.id, cap);
 
   const details = await getAppDataBatch(ids);
   const candidates: Candidate[] = [];
   for (const id of ids) {
     const steam = details.get(id);
-    if (!steam || !isLikelyStandaloneSteamGame(steam)) continue;
-    candidates.push({ id, name: steam.name!, rawg: null, steamId: id, steam });
+    if (!steam || !isLikelyStandaloneSteamGame(steam) || !matchesReleaseFilter(steam.release_date?.date, releaseFilter)) continue;
+    candidates.push({ id, name: steam.name!, gamebrain: null, wikidata: null, steamId: id, steam, matchedPlatformNames: [], similarToReference: false });
   }
   return candidates;
-
-}
-
-
-const RAWG_TAG_NOISE = /(steam achievements|full controller support|partial controller support|steam cloud|steam trading cards|steam-trading-cards|steam workshop|remote play|captions available|includes level editor|stats|leaderboards|family sharing)/i;
-
-function rawgGameplayTags(game: RawgGameSummary | RawgGameDetail): string[] {
-  return (game.tags ?? []).map((item) => item.name).filter((name) => !RAWG_TAG_NOISE.test(name));
 }
 
 function candidateGenres(candidate: Candidate): string[] {
-  return candidate.rawg?.genres?.map((item) => item.name) ?? candidate.steam?.genres?.map((item) => item.description) ?? [];
+  if (candidate.gamebrain?.genre) return candidate.gamebrain.genre.split(/[,/]/).map((value) => value.trim()).filter(Boolean);
+  return candidate.wikidata?.genres ?? candidate.steam?.genres?.map((item) => item.description) ?? [];
 }
 
 function candidateTags(candidate: Candidate): string[] {
-  return candidate.rawg ? rawgGameplayTags(candidate.rawg).slice(0, 10) : derivePlayerModes(candidate.steam ?? {});
+  if (candidate.gamebrain) return candidate.gamebrain.genre ? [candidate.gamebrain.genre] : [];
+  return candidate.wikidata ? [...candidate.wikidata.gameModes, ...candidate.wikidata.genres] : derivePlayerModes(candidate.steam ?? {});
 }
 
 function candidatePlayerModes(candidate: Candidate): string[] {
-  if (candidate.steam) return derivePlayerModes(candidate.steam);
-  return candidate.rawg ? inferRawgPlayerModes(candidate.rawg) : [];
+  if (candidate.gamebrain) return derivePlayerModes(candidate.steam ?? {});
+  return candidate.wikidata?.gameModes ?? derivePlayerModes(candidate.steam ?? {});
 }
 
 function candidatePlatforms(candidate: Candidate): string[] {
-  if (candidate.rawg) return rawgPlatformNames(candidate.rawg);
+  if (candidate.matchedPlatformNames.length > 0) return candidate.matchedPlatformNames;
+  if (candidate.wikidata) return candidate.wikidata.platforms;
   const platforms = candidate.steam?.platforms;
   return [platforms?.windows ? "Windows" : "", platforms?.mac ? "macOS" : "", platforms?.linux ? "Linux" : ""].filter(Boolean);
 }
 
-async function pickAndRank(
-  messages: ChatMessage[],
-  candidates: Candidate[],
-  count: number
-): Promise<{ reply: string; picks: { id: number; reason: string }[] }> {
+function candidateReleaseDate(candidate: Candidate): string {
+  if (candidate.gamebrain?.year) return `${candidate.gamebrain.year}-01-01`;
+  return candidate.wikidata?.releaseDate ?? candidate.steam?.release_date?.date ?? "未知";
+}
+
+async function pickAndRank(messages: ChatMessage[], candidates: Candidate[], count: number, platforms: Platform[], previousGames: PreviousRecommendation[], releaseFilter: ReleaseFilter): Promise<{ reply: string; picks: { id: number; reason: string }[] }> {
+  const targetCount = Math.min(count, candidates.length);
+  const aiPickCount = targetCount;
   const compact = candidates.map((candidate) => ({
     id: candidate.id,
-    鍚嶇О: candidate.name,
-    骞冲彴: candidatePlatforms(candidate).join(" / ") || "鏈煡",
-    绫诲瀷: candidateGenres(candidate).join(" / "),
-    标签: candidateTags(candidate).join(" / "),
+    名称: candidate.name,
+    平台: candidatePlatforms(candidate).join(" / ") || "未知",
+    类型: candidateGenres(candidate).join(" / "),
     玩法: candidatePlayerModes(candidate).join(" / "),
-    骞冲潎娓哥帺鏃堕暱: candidate.rawg?.playtime ? `${candidate.rawg.playtime} 灏忔椂` : "鏈煡",
     价格: candidate.steam?.is_free ? "免费" : candidate.steam?.price_overview?.final_formatted ?? "未知",
-    璇勫垎: candidate.rawg?.rating ?? candidate.steam?.metacritic?.score ?? null,
-    鍙戝敭: candidate.rawg?.released ?? candidate.steam?.release_date?.date ?? "鏈煡",
+    评分: candidate.gamebrain?.rating?.mean ? Math.round(candidate.gamebrain.rating.mean * 100) : null,
+    相似参考: candidate.similarToReference,
+    发售日期: candidateReleaseDate(candidate),
   }));
-
-  const system = `浣犳槸涓€涓腑鏂囨父鎴忔帹鑽愪笓瀹躲€備綘鍙兘浠庝笅鏂圭湡瀹?API 鍊欓€夋父鎴忎腑鎸戦€夛紝涓ョ缂栭€犲€欓€変箣澶栫殑娓告垙鎴栦俊鎭€?瑙勫垯锛?- 鐢ㄦ埛鎸囧畾骞冲彴鍋忓ソ锛屼紭鍏堝尮閰嶅搴斿钩鍙扮殑娓告垙
-- 鎸戦€夋渶绗﹀悎鐢ㄦ埛瀹屾暣瀵硅瘽闇€姹傜殑 ${count} 娆撅紝鎸夊尮閰嶅害浠庨珮鍒颁綆鎺掑簭
-- 閲嶇偣鏍稿骞冲彴銆佸崟浜?澶氫汉/鍚堜綔鏂瑰紡銆侀鏉愩€佺帺娉曘€侀毦搴﹀拰浠锋牸闇€姹?- 姣忔鍐欎竴鍙?30-60 瀛楃殑涓枃鎺ㄨ崘鐞嗙敱锛屽苟涓烘瘡娆炬父鎴忔彁渚涗腑鏂囨樉绀哄悕绉帮紙displayName瀛楁锛岃嫢鑻辨枃鍚嶅凡鏄€氱敤绉板懠鍒欏彲鐣欑┖锛夛紝鍏蜂綋璇存槑瀹冧负浠€涔堝鍚堢敤鎴烽渶姹傦紝绂佹绌鸿瘽
-- 鍊欓€夋槑纭笌闇€姹傚啿绐佹椂涓嶈閫夋嫨锛涘€欓€変笉瓒虫椂鍙互灏戜簬 ${count} 娆?- reply 鍙仛涓€涓ゅ彞鎬讳綋鎬荤粨锛屼笉瑕佹壙璇哄叿浣撴帹鑽愭暟閲?- 鍙緭鍑?JSON锛歿"reply":"...","picks":[{"id":鏁板瓧,"reason":"..."}]}`;
-
-  const output = await chatCompletion(
+  const system = `你是一名中文游戏推荐专家。你只能从下方真实候选游戏中挑选，严禁编造候选之外的游戏或信息。
+- 用户明确标记为“喜欢”的游戏是最强偏好信号
+- 不要把用户已经喜欢的游戏本身当作新推荐
+- 用户选择的平台为硬约束。当前平台偏好：${platformPreferenceText(platforms)}\n- 发售时间偏好：${releaseFilterText(releaseFilter)}
+- 挑选匹配度最高的恰好 ${aiPickCount} 款，按匹配度从高到低排序；剩余结果由系统按数据库相关度补齐
+- 重点核对平台、单人/多人方式、题材、玩法、难度和价格
+- 每款写一句具体的中文推荐理由
+- 只输出 JSON：{"reply":"...","picks":[{"id":数字,"reason":"..."}]}`;
+  const parsed = await chatCompletionJson<{ reply?: string; picks?: { id: number; reason: string }[] }>(
     [
       { role: "system", content: system },
-      { role: "user", content: `鐢ㄦ埛瀵硅瘽锛歕n${transcript(messages)}\n\n鍊欓€夋父鎴忥細\n${JSON.stringify(compact)}` },
+      { role: "user", content: `用户对话：\n${transcript(messages)}\n\n上一批推荐（用户可能希望在此基础上修正）：\n${JSON.stringify(previousGames)}\n\n真实候选游戏：\n${JSON.stringify(compact)}` },
     ],
-    { maxTokens: Math.max(4000, count * 800), temperature: 0.6 }
+    { maxTokens: Math.min(9000, Math.max(5000, aiPickCount * 400)), temperature: 0.35 }
   );
-
-  const parsed = extractJson<{ reply?: string; picks?: { id: number; reason: string }[] }>(output);
   const validIds = new Set(candidates.map((candidate) => candidate.id));
   const seen = new Set<number>();
-  const picks = (parsed.picks ?? [])
-    .filter((pick) => {
-      if (!validIds.has(pick.id) || typeof pick.reason !== "string" || seen.has(pick.id)) return false;
-      seen.add(pick.id);
-      return true;
-    })
-        .slice(0, count);
-  if (picks.length === 0) {
-    console.error("[pickAndRank] parsed.picks count:", (parsed.picks ?? []).length, "validIds count:", validIds.size);
-    console.error("[pickAndRank] parsed.picks:", JSON.stringify((parsed.picks ?? []).slice(0, 3)));
-    console.error("[pickAndRank] sample validIds:", JSON.stringify([...validIds].slice(0, 5)));
-    throw new Error("AI 未能从真实候选中选出游戏，请换个说法重试");
+  const picks = (parsed.picks ?? []).filter((pick) => {
+    if (!validIds.has(pick.id) || typeof pick.reason !== "string" || seen.has(pick.id)) return false;
+    seen.add(pick.id);
+    return true;
+  }).slice(0, aiPickCount);
+  for (const candidate of candidates) {
+    if (picks.length >= targetCount) break;
+    if (seen.has(candidate.id)) continue;
+    seen.add(candidate.id);
+    const genre = candidateGenres(candidate).slice(0, 2).join("、") || "玩法";
+    picks.push({ id: candidate.id, reason: `支持${platformPreferenceText(platforms)}，以${genre}为核心，可作为符合当前偏好的补充选择。` });
   }
+  if (picks.length === 0) throw new Error("AI 未能从真实候选中选出游戏，请换个说法重试");
   return { reply: parsed.reply?.trim() || "为你找到这些游戏：", picks };
 }
 
-
-function imageProxyUrl(url: string | null | undefined): string {
-  if (!url) return "";
-  return `/api/image-proxy?url=${encodeURIComponent(url)}`;
+function imageProxyUrl(url?: string): string {
+  return url ? `/api/image-proxy?url=${encodeURIComponent(url)}` : "";
 }
 
-function pickHeaderImage(steamImage: string | null | undefined, rawgBg: string | null | undefined): string {
-  // Steam CDN is accessible in China; prefer it when available
-  if (steamImage) return steamImage;
-  // RAWG media CDN (media.rawg.io) often blocked in China; proxy through our server
-  if (rawgBg) return `/api/image-proxy?url=${encodeURIComponent(rawgBg)}`;
-  return "";
+function reviewFromGameBrain(game: GameBrainGame | null): Game["review"] {
+  if (!game?.rating?.mean) return null;
+  const positiveRate = Math.round(game.rating.mean * 100);
+  return { label: `GameBrain ${positiveRate}/100`, positiveRate, total: game.rating.count ?? 0, source: "gamebrain" };
 }
 
 function reviewFromSteam(summary: ReviewSummary | undefined): Game["review"] {
@@ -298,139 +397,128 @@ function reviewFromSteam(summary: ReviewSummary | undefined): Game["review"] {
   return { label: reviewLabel(positiveRate, summary.total_reviews), positiveRate, total: summary.total_reviews, source: "steam" };
 }
 
-function reviewFromRawg(game: RawgGameSummary | null): Game["review"] {
-  if (!game?.rating) return null;
-  const positiveRate = Math.min(100, Math.round((game.rating / 5) * 100));
-  return {
-    label: `RAWG ${game.rating.toFixed(1)}/5`,
-    positiveRate,
-    total: game.ratings_count ?? 0,
-    source: "rawg",
-  };
-}
-
 function formatReleaseDate(value?: string | null): string {
   if (!value) return "未知";
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (match) return `${match[1]} 年 ${Number(match[2])} 月 ${Number(match[3])} 日`;
   return value;
 }
-function selectStoreUrl(candidate: Candidate, links: RawgStoreLink[]): { url: string; name: string } {
+
+function selectStoreUrl(candidate: Candidate, platforms: Platform[]): { url: string; name: string } {
+  if (candidate.gamebrain?.link) return { url: candidate.gamebrain.link, name: "GameBrain" };
+  const sites = candidate.wikidata?.officialWebsites ?? [];
+  if (platforms.includes("ns")) {
+    const nintendo = sites.find((url) => /nintendo./i.test(url));
+    if (nintendo) return { url: nintendo, name: "Nintendo Store" };
+  }
+  if (platforms.includes("psn")) {
+    const playstation = sites.find((url) => /playstation./i.test(url));
+    if (playstation) return { url: playstation, name: "PlayStation Store" };
+  }
   if (candidate.steamId) return { url: `https://store.steampowered.com/app/${candidate.steamId}`, name: "Steam Store" };
-  const preferred = links.find((link) => link.store_id === 1) ?? links[0];
-  if (preferred?.url) return { url: preferred.url, name: "View in Store" };
-  if (candidate.rawg) return { url: `https://rawg.io/games/${candidate.rawg.slug}`, name: "RAWG Page" };
-  return { url: "https://store.steampowered.com", name: "Steam Store" };
+  if (sites[0]) return { url: sites[0], name: "Official Site" };
+  if (candidate.wikidata) return { url: wikidataPageUrl(candidate.wikidata), name: candidate.wikidata.wikipedia ? "Wikipedia" : "Wikidata" };
+  return { url: "https://www.wikidata.org", name: "Wikidata" };
 }
 
-function toGame(
-  candidate: Candidate,
-  reason: string,
-  detail: RawgGameDetail | null,
-  reviewSummary: ReviewSummary | undefined,
-  storeLinks: RawgStoreLink[]
-): Game {
-  const rawg = detail ?? candidate.rawg;
+function toGame(candidate: Candidate, reason: string, reviewSummary: ReviewSummary | undefined, platforms: Platform[], enrichment?: WikipediaEnrichment): Game {
+  const wiki = candidate.wikidata;
   const steam = candidate.steam;
-  const platformNames = rawg ? rawgPlatformNames(rawg) : candidatePlatforms(candidate);
-  const playerModes = steam ? derivePlayerModes(steam) : rawg ? inferRawgPlayerModes(rawg) : [];
-  const genres = rawg?.genres?.map((item) => item.name) ?? steam?.genres?.map((item) => item.description) ?? [];
-  const rawgTags = rawg ? rawgGameplayTags(rawg).filter((tag) => !genres.includes(tag)) : [];
-  const tags = Array.from(new Set([...rawgTags, ...genres, ...playerModes])).slice(0, 8);
-  const store = selectStoreUrl(candidate, storeLinks);
-  const released = rawg?.released ?? steam?.release_date?.date;
-  const steamReview = reviewFromSteam(reviewSummary);
-
+  const platformNames = candidatePlatforms(candidate);
+  const playerModes = candidatePlayerModes(candidate);
+  const genres = candidateGenres(candidate);
+  const tags = Array.from(new Set([...candidateTags(candidate), ...genres, ...playerModes])).slice(0, 8);
+  const store = selectStoreUrl(candidate, platforms);
+  const showSteamCommerce = platforms.length === 0 || platforms.includes("steam");
   return {
     id: candidate.id,
-    source: rawg ? "rawg" : "steam",
+    source: candidate.gamebrain ? "gamebrain" : wiki ? "wikidata" : "steam",
     steamAppId: candidate.steamId,
-    name: steam?.name ?? rawg?.name ?? candidate.name,
-    headerImage: pickHeaderImage(steam?.header_image, rawg?.background_image),
-    shortDescription: (steam?.short_description ?? detail?.description_raw ?? "").replace(/\s+/g, " ").trim(),
+    name: candidate.gamebrain?.name ?? wiki?.name ?? steam?.name ?? candidate.name,
+    headerImage: (candidate.gamebrain?.image ?? steam?.header_image ?? imageProxyUrl(enrichment?.imageUrl ?? wiki?.imageUrl)) || `/api/game-placeholder?name=${encodeURIComponent(candidate.name)}`,
+    shortDescription: (candidate.gamebrain?.short_description ?? steam?.short_description ?? enrichment?.summary ?? wiki?.description ?? "").replace(/\s+/g, " ").trim(),
     reason,
     genres,
     tags,
     playerModes,
     platformNames,
     price: {
-      formatted: steam?.is_free ? "免费" : steam?.price_overview?.final_formatted ?? "暂无价格",
-      finalCny: steam?.is_free ? 0 : steam?.price_overview ? steam.price_overview.final / 100 : null,
-      discountPercent: steam?.price_overview?.discount_percent ?? 0,
+      formatted: showSteamCommerce ? (steam?.is_free ? "免费" : steam?.price_overview?.final_formatted ?? "暂无价格") : "主机价格未提供",
+      finalCny: showSteamCommerce ? (steam?.is_free ? 0 : steam?.price_overview ? steam.price_overview.final / 100 : null) : null,
+      discountPercent: showSteamCommerce ? steam?.price_overview?.discount_percent ?? 0 : 0,
     },
-    releaseDate: formatReleaseDate(released),
-    releaseTimestamp: rawg?.released
-      ? Number.isNaN(Date.parse(rawg.released))
-        ? null
-        : Date.parse(rawg.released)
-      : parseReleaseTimestamp(steam?.release_date?.date),
-    developers: detail?.developers?.map((item) => item.name) ?? steam?.developers ?? [],
-    publishers: detail?.publishers?.map((item) => item.name) ?? steam?.publishers ?? [],
+    releaseDate: formatReleaseDate(candidateReleaseDate(candidate)),
+    releaseTimestamp: candidate.gamebrain?.year ? Date.UTC(candidate.gamebrain.year, 0, 1) : wiki?.releaseTimestamp ?? parseReleaseTimestamp(steam?.release_date?.date),
+    developers: wiki?.developers ?? steam?.developers ?? [],
+    publishers: wiki?.publishers ?? steam?.publishers ?? [],
     platforms: {
       windows: platformNames.some((name) => /pc|windows/i.test(name)),
       mac: platformNames.some((name) => /mac/i.test(name)),
       linux: platformNames.some((name) => /linux/i.test(name)),
     },
-    metacritic: rawg?.metacritic ?? steam?.metacritic?.score ?? null,
-    review: steamReview ?? reviewFromRawg(rawg ?? null),
-    playtimeHours: rawg?.playtime && rawg.playtime > 0 ? rawg.playtime : null,
+    metacritic: steam?.metacritic?.score ?? null,
+    review: reviewFromSteam(reviewSummary) ?? reviewFromGameBrain(candidate.gamebrain),
+    playtimeHours: null,
     storeUrl: store.url,
     storeName: store.name,
   };
 }
 
-export async function recommend(messages: ChatMessage[], excludeIds: number[], platforms: Platform[] = [], count = 6): Promise<RecommendResponse> {
+export async function recommend(messages: ChatMessage[], excludeIds: number[], platforms: Platform[] = [], count = 6, previousGames: PreviousRecommendation[] = [], releaseFilter: ReleaseFilter = "all"): Promise<RecommendResponse> {
   const started = Date.now();
   let stageStarted = started;
-  const includeSteam = shouldMatchSteam(messages, platforms);
-  const plan = await buildSearchPlan(messages);
+  const includeSteam = true;
+  const steamOnly = platforms.length === 1 && platforms[0] === "steam";
+  const plan = await buildSearchPlan(messages, platforms, previousGames, releaseFilter);
   const planMs = Date.now() - stageStarted;
   stageStarted = Date.now();
-  let candidates = await gatherRawgCandidates(plan, excludeIds, includeSteam, platforms, 40);
-  let usingRawg = candidates.length > 0;
 
-  if (candidates.length === 0) {
-      candidates = await gatherSteamCandidates(plan, excludeIds, 50);
-    usingRawg = false;
+  let candidates: Candidate[] = [];
+  let usingGameBrain = false;
+  let usingWikidata = false;
+  if (isGameBrainConfigured()) {
+    try {
+      candidates = await gatherGameBrainCandidates(plan, excludeIds, platforms, count, messages, releaseFilter);
+      usingGameBrain = candidates.length > 0;
+    } catch (error) {
+      if (!(error instanceof GameBrainUnavailableError || error instanceof GameBrainQuotaError)) throw error;
+      console.warn("[recommend] GameBrain fallback:", error.message);
+    }
   }
 
-  if (candidates.length < 4 && excludeIds.length > 0) {
-    const relaxed = excludeIds.slice(0, Math.floor(excludeIds.length / 2));
-    candidates = usingRawg ? await gatherRawgCandidates(plan, relaxed, includeSteam, platforms, 40) : await gatherSteamCandidates(plan, relaxed, 50);
+  if (candidates.length < count) {
+    const fallback = steamOnly
+      ? await gatherSteamCandidates(plan, excludeIds, STEAM_CANDIDATE_CAP, releaseFilter)
+      : await gatherWikidataCandidates(plan, excludeIds, includeSteam, platforms, WIKIDATA_CANDIDATE_CAP, releaseFilter);
+    const seenCandidateIds = new Set(candidates.map((candidate) => candidate.id));
+    for (const candidate of fallback) {
+      if (!seenCandidateIds.has(candidate.id)) candidates.push(candidate);
+      if (candidates.length >= Math.max(count, 30)) break;
+    }
+    usingWikidata = !steamOnly && fallback.length > 0;
   }
+
   if (candidates.length === 0) throw new Error("真实游戏库中没有检索到相关游戏，请换个描述重试");
   const candidateMs = Date.now() - stageStarted;
   stageStarted = Date.now();
 
-  const { reply, picks } = await pickAndRank(messages, candidates, count);
+  const rankPool = candidates.slice(0, Math.min(candidates.length, Math.max(count + 10, count)));
+  const { reply, picks } = await pickAndRank(messages, rankPool, count, platforms, previousGames, releaseFilter);
   const rankMs = Date.now() - stageStarted;
   stageStarted = Date.now();
   const candidateMap = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   const pickedCandidates = picks.map((pick) => candidateMap.get(pick.id)).filter((candidate): candidate is Candidate => Boolean(candidate));
-  const rawgIds = pickedCandidates.filter((candidate) => candidate.rawg).map((candidate) => candidate.id);
   const steamIds = pickedCandidates.map((candidate) => candidate.steamId).filter((id): id is number => typeof id === "number");
+  const wikiGames = pickedCandidates.map((candidate) => candidate.wikidata).filter((game): game is WikidataGame => Boolean(game));
+  const [steamReviews, wikipedia] = await Promise.all([getReviewSummaries(steamIds), getWikipediaEnrichment(wikiGames)]);
 
-  const [rawgDetails, rawgStoreLinks, steamReviews] = await Promise.all([
-    getRawgGamesBatch(rawgIds),
-    getRawgStoreLinksBatch(rawgIds),
-    getReviewSummaries(steamIds),
-  ]);
-
-  const games = picks
-    .map((pick) => {
-      const candidate = candidateMap.get(pick.id);
-      if (!candidate) return null;
-      return toGame(
-        candidate,
-        pick.reason,
-        rawgDetails.get(candidate.id) ?? null,
-        candidate.steamId ? steamReviews.get(candidate.steamId) : undefined,
-        rawgStoreLinks.get(candidate.id) ?? []
-      );
-    })
-    .filter((game): game is Game => game !== null);
+  const games = picks.map((pick) => {
+    const candidate = candidateMap.get(pick.id);
+    if (!candidate) return null;
+    return toGame(candidate, pick.reason, candidate.steamId ? steamReviews.get(candidate.steamId) : undefined, platforms, wikipedia.get(candidate.id));
+  }).filter((game): game is Game => game !== null);
 
   const enrichMs = Date.now() - stageStarted;
-  console.info(`[recommend] timing plan=${planMs}ms candidates=${candidateMs}ms rank=${rankMs}ms enrich=${enrichMs}ms total=${Date.now() - started}ms rawg=${usingRawg} steamMatch=${includeSteam}`);
+  console.info(`[recommend] timing plan=${planMs}ms candidates=${candidateMs}ms rank=${rankMs}ms enrich=${enrichMs}ms total=${Date.now() - started}ms gamebrain=${usingGameBrain} wikidata=${usingWikidata} platforms=${platforms.join(",") || "any"} release=${releaseFilter}`);
   return { reply, games };
 }

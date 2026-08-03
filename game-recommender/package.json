@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/game-utils.test.mjs tests/rawg.test.mjs"
+    "test": "node --experimental-strip-types --test tests/ai.test.mjs tests/gamebrain.test.mjs tests/game-utils.test.mjs tests/wikidata.test.mjs tests/recommend-preferences.test.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.27.0",

@@ -1,11 +1,27 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { Gamepad2, Monitor, RefreshCw } from "lucide-react";
 import { sortGames, type SortMode } from "@/lib/game-utils";
-import type { Game } from "@/lib/types";
+import type { Game, Platform, ReleaseFilter } from "@/lib/types";
+import GameSearchInput from "./GameSearchInput";
 import GameCard from "./GameCard";
 import PixelLogo from "./PixelLogo";
+
+const RELEASE_OPTIONS: { key: ReleaseFilter; label: string }[] = [
+  { key: "all", label: "不限" },
+  { key: "last1", label: "近1年" },
+  { key: "last3", label: "近3年" },
+  { key: "last5", label: "近5年" },
+  { key: "before2020", label: "2020年前" },
+  { key: "before2010", label: "2010年前" },
+];
+
+const PLATFORM_OPTIONS: { key: Platform; label: string; icon: typeof Monitor }[] = [
+  { key: "steam", label: "Steam", icon: Monitor },
+  { key: "psn", label: "PSN", icon: Gamepad2 },
+  { key: "ns", label: "NS", icon: Gamepad2 },
+];
 
 const SORT_OPTIONS: { key: SortMode; label: string }[] = [
   { key: "match", label: "匹配度" },
@@ -15,7 +31,7 @@ const SORT_OPTIONS: { key: SortMode; label: string }[] = [
   { key: "price", label: "价格" },
 ];
 
-const LOADING_STEPS = ["正在理解你的需求…", "正在检索 RAWG 与 Steam 游戏库…", "AI 正在核对平台并撰写推荐理由…"];
+const LOADING_STEPS = ["正在理解你的需求…", "正在检索 GameBrain 与 Steam 游戏库…", "AI 正在核对平台并撰写推荐理由…"];
 
 export default function ResultsView({
   games,
@@ -25,6 +41,13 @@ export default function ResultsView({
   onCountChange,
   onRefreshBatch,
   onSelectGame,
+  favoriteGames,
+  onFavoriteGamesChange,
+  platforms,
+  onPlatformsChange,
+  onApplyPreferences,
+  releaseFilter,
+  onReleaseFilterChange,
 }: {
   games: Game[];
   loading: boolean;
@@ -33,6 +56,13 @@ export default function ResultsView({
   onCountChange: (c: number) => void;
   onRefreshBatch: () => void;
   onSelectGame: (game: Game) => void;
+  favoriteGames: string[];
+  onFavoriteGamesChange: (games: string[]) => void;
+  platforms: Platform[];
+  onPlatformsChange: (platforms: Platform[]) => void;
+  onApplyPreferences: (favoriteGames: string[], platforms: Platform[], releaseFilter: ReleaseFilter) => void;
+  releaseFilter: ReleaseFilter;
+  onReleaseFilterChange: (filter: ReleaseFilter) => void;
 }) {
   const [sort, setSort] = useState<SortMode>("match");
   const [step, setStep] = useState(0);
@@ -58,6 +88,51 @@ export default function ResultsView({
         </div>
         <p className="text-sm text-ink/50">{loading ? "推荐生成中…" : `为你找到 ${games.length} 款游戏`}</p>
       </header>
+
+      <section className="mb-5 rounded-lg border border-ink/10 bg-white p-3 shadow-sm">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
+          <div className="min-w-0 flex-1">
+            <p className="mb-1.5 text-xs font-medium text-ink/55">喜好游戏</p>
+            <GameSearchInput chips={favoriteGames} onChipsChange={onFavoriteGamesChange} />
+          </div>
+          <div className="shrink-0">
+            <p className="mb-1.5 text-xs font-medium text-ink/55">平台偏好</p>
+            <div className="flex flex-wrap gap-1.5">
+              {PLATFORM_OPTIONS.map(({ key, label, icon: Icon }) => (
+                <button
+                  key={key}
+                  onClick={() => onPlatformsChange(platforms.includes(key) ? platforms.filter((value) => value !== key) : [...platforms, key])}
+                  className={`inline-flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs transition ${platforms.includes(key) ? "border-brand bg-brand/10 font-medium text-brand-strong" : "border-ink/15 text-ink/65 hover:border-brand-2"}`}
+                >
+                  <Icon size={13} />
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="mb-1.5 text-xs font-medium text-ink/55">发售时间</p>
+            <div className="flex flex-wrap gap-1.5">
+              {RELEASE_OPTIONS.map(({ key, label }) => (
+                <button
+                  key={key}
+                  onClick={() => onReleaseFilterChange(key)}
+                  className={`rounded-full border px-3 py-1.5 text-xs transition ${releaseFilter === key ? "border-brand bg-brand/10 font-medium text-brand-strong" : "border-ink/15 text-ink/65 hover:border-brand-2"}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <button
+            onClick={() => onApplyPreferences(favoriteGames, platforms, releaseFilter)}
+            disabled={loading}
+            className="shrink-0 rounded-md bg-brand-gradient px-3.5 py-2 text-xs font-semibold text-white transition enabled:hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            应用偏好并重新推荐
+          </button>
+        </div>
+      </section>
 
       <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
         <div className="flex flex-wrap rounded-lg border border-ink/10 bg-white p-1">
@@ -134,6 +209,7 @@ export default function ResultsView({
           暂时没有找到合适的游戏，请补充平台、类型或游玩人数后重试。
         </div>
       )}
+      <p className="mt-8 text-center text-xs text-ink/35">数据来自 GameBrain、Wikidata 与 Steam · <a href="https://gamebrain.co/api" target="_blank" rel="noreferrer" className="underline hover:text-brand-strong">Powered by GameBrain</a></p>
     </div>
   );
 }

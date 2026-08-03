@@ -1,4 +1,5 @@
 export type Platform = "steam" | "psn" | "ns";
+export type ReleaseFilter = "all" | "last1" | "last3" | "last5" | "before2020" | "before2010";
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -15,12 +16,12 @@ export interface GameReview {
   label: string;
   positiveRate: number;
   total: number;
-  source: "steam" | "rawg";
+  source: "steam" | "gamebrain" | "wikidata" | "rawg";
 }
 
 export interface Game {
   id: number;
-  source: "rawg" | "steam";
+  source: "gamebrain" | "wikidata" | "steam" | "rawg";
   steamAppId: number | null;
   name: string;
   headerImage: string;
@@ -41,6 +42,17 @@ export interface Game {
   playtimeHours: number | null;
   storeUrl: string;
   storeName: string;
+}
+
+
+export interface PreviousRecommendation {
+  id: number;
+  name: string;
+  platformNames: string[];
+  genres: string[];
+  tags: string[];
+  playerModes: string[];
+  reason: string;
 }
 
 export interface RecommendResponse {

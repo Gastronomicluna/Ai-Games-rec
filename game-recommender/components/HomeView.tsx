@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { ArrowRight, Database, Gamepad2, MessagesSquare, Monitor, RefreshCw, Sparkles } from "lucide-react";
-import type { Platform } from "@/lib/types";
+import type { Platform, ReleaseFilter } from "@/lib/types";
 import GameSearchInput from "./GameSearchInput";
 import PixelLogo from "./PixelLogo";
 
@@ -14,7 +14,7 @@ const EXAMPLE_PROMPTS = [
 
 const FEATURES = [
   { icon: MessagesSquare, title: "对话式推荐", desc: "用大白话描述需求，边聊边改" },
-  { icon: Database, title: "真实游戏数据", desc: "实时检索 RAWG 与 Steam，不编造" },
+  { icon: Database, title: "真实游戏数据", desc: "实时检索 GameBrain 与 Steam，不编造" },
   { icon: RefreshCw, title: "列表持续迭代", desc: "补充需求、换一批，越聊越准" },
 ];
 
@@ -25,6 +25,15 @@ const PIXELS = [
   { left: "88%", top: "66%", size: 8, color: "#f88e1c", delay: "1.8s" },
   { left: "66%", top: "12%", size: 6, color: "#f88e1c", delay: "2.4s" },
   { left: "8%", top: "44%", size: 6, color: "#6ccee3", delay: "3s" },
+];
+
+const RELEASE_OPTIONS: { key: ReleaseFilter; label: string }[] = [
+  { key: "all", label: "不限" },
+  { key: "last1", label: "近1年" },
+  { key: "last3", label: "近3年" },
+  { key: "last5", label: "近5年" },
+  { key: "before2020", label: "2020年前" },
+  { key: "before2010", label: "2010年前" },
 ];
 
 const PLATFORM_OPTIONS: { key: Platform; label: string; icon: typeof Monitor }[] = [
@@ -41,6 +50,10 @@ export default function HomeView({
   count,
   onCountChange,
   onSubmit,
+  favoriteGames,
+  onFavoriteGamesChange,
+  releaseFilter,
+  onReleaseFilterChange,
 }: {
   loading: boolean;
   error: string | null;
@@ -49,9 +62,13 @@ export default function HomeView({
   count: number;
   onCountChange: (c: number) => void;
   onSubmit: (text: string) => void;
+  favoriteGames: string[];
+  onFavoriteGamesChange: (games: string[]) => void;
+  releaseFilter: ReleaseFilter;
+  onReleaseFilterChange: (filter: ReleaseFilter) => void;
 }) {
   const [text, setText] = useState("");
-  const [chips, setChips] = useState<string[]>([]);
+  const chips = favoriteGames;
 
   const canSubmit = !loading && (text.trim().length > 0 || chips.length > 0);
 
@@ -100,7 +117,7 @@ export default function HomeView({
               {chips.map((c) => (
                 <span key={c} className="flex items-center gap-1 rounded bg-brand-2/15 px-2 py-0.5 text-xs text-brand-2-strong">
                   喜欢《{c}》
-                  <button onClick={() => setChips(chips.filter((x) => x !== c))} aria-label={`移除${c}`} className="hover:text-ink">
+                  <button onClick={() => onFavoriteGamesChange(chips.filter((x) => x !== c))} aria-label={`移除${c}`} className="hover:text-ink">
                     <Sparkles size={12} />
                   </button>
                 </span>
@@ -139,7 +156,7 @@ export default function HomeView({
         )}
 
         <div className="mt-4 w-full">
-          <GameSearchInput chips={chips} onChipsChange={setChips} />
+          <GameSearchInput chips={chips} onChipsChange={onFavoriteGamesChange} />
         </div>
 
         <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
@@ -159,6 +176,19 @@ export default function HomeView({
             </button>
           ))}
         
+        <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+          <span className="text-xs text-ink/45">发售时间：</span>
+          {RELEASE_OPTIONS.map(({ key, label }) => (
+            <button
+              key={key}
+              onClick={() => onReleaseFilterChange(key)}
+              className={`rounded-full border px-3 py-1 text-xs transition ${releaseFilter === key ? "border-brand bg-brand/10 font-medium text-brand-strong" : "border-ink/15 bg-white text-ink/70 hover:border-brand-2 hover:text-brand-2-strong"}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
           <span className="text-xs text-ink/45">每批数量：</span>
           {([6, 10, 15, 20] as const).map((n) => (
@@ -202,7 +232,7 @@ export default function HomeView({
       </main>
 
       <footer className="pb-5 text-center text-xs text-ink/35">
-        游戏数据来自 RAWG 与 Steam · 推荐由 AI 实时生成
+        游戏数据来自 GameBrain、Wikidata 与 Steam · 推荐由 AI 实时生成 · <a href="https://gamebrain.co/api" target="_blank" rel="noreferrer" className="underline hover:text-brand-strong">Powered by GameBrain</a>
       </footer>
     </div>
   );
