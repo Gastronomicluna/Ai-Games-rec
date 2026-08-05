@@ -1,5 +1,5 @@
 export type Platform = "steam" | "psn" | "ns";
-export type ReleaseFilter = "all" | "last1" | "last3" | "last5" | "before2020" | "before2010";
+export type ReleaseFilter = "all" | "recent" | "classic" | "last1" | "last3" | "last5" | "before2020" | "before2010";
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -53,6 +53,14 @@ export interface PreviousRecommendation {
   tags: string[];
   playerModes: string[];
   reason: string;
+}
+
+export interface AgentTraceEvent {
+  id: string;
+  stage: "intent" | "profile" | "agent" | "tool" | "filter" | "rank" | "enrich" | "complete" | "error";
+  title: string;
+  detail: string;
+  timestamp: number;
 }
 
 export interface RecommendResponse {

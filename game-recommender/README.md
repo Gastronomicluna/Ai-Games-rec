@@ -1,7 +1,7 @@
-﻿# 玩什么 · AI 游戏推荐
+# 玩什么 · AI 游戏推荐
 
 > 告诉 AI 你现在的游戏口味，从真实游戏库里为你挑出下一款心头好。
-
+An LLM + GameBrain + Steam game recommendation site. A bounded recommendation agent dynamically selects search directions, gathers verified game candidates, and produces personalized recommendations.
 一个基于 LLM + GameBrain + Steam 的游戏推荐网站。用户用自然语言描述需求，系统从真实游戏数据库中检索候选，再由 AI 排序并撰写个性化推荐理由。
 
 ## 功能
@@ -28,19 +28,30 @@
 | 游戏数据 | GameBrain API + Steam Store API，Wikidata 备用 |
 | 包管理 | pnpm |
 
-## 推荐流水线
+## Recommendation Agent
+
+The recommendation request now runs as a bounded agent loop instead of a fixed one-shot workflow:
 
 ```
-用户输入 → LLM生成搜索计划 → GameBrain语义分页召回候选
-    → 平台过滤 → LLM评分排序 → 数据补全 → 输出推荐列表
+user context -> agent observes context -> choose a search direction
+                                      -> GameBrain / Steam / Wikidata
+                                      -> inspect the candidate pool
+                                      -> search again or finalize
+                                      -> rank, enrich, and return results
 ```
 
-详细四步：
-1. **搜索计划**（快模型）：分析对话，生成 15-20 个候选游戏标题 + 3-5 个类型关键词
-2. **候选搜集**（6 路并发）：RAUG（上限 40）+ Steam（上限 50），按平台偏好过滤
-3. **AI 排序**（推理模型）：针对每款候选打分并写一句推荐理由
-4. **数据补全**（并行）：补充详情、评价、价格、商店链接
+The agent runs for at most 3 turns. Each turn chooses one action:
 
+- **search**: generate a new English query, concrete titles, and keywords, then call the real game data sources
+- **finalize**: stop retrieval when the candidate pool is sufficient and satisfies platform and release constraints
+
+Every turn receives the executed queries and the current verified candidate summary, so it can avoid duplicate searches and adapt to missing genres, platforms, or release periods. Final ranking and detail enrichment remain separate bounded steps after the agent finishes.
+
+Data source strategy:
+1. **GameBrain**: semantic retrieval and similar-game search
+2. **Steam**: game verification and store metadata
+3. **Wikidata**: fallback when GameBrain is unavailable or insufficient
+4. **Wikipedia / Steam Reviews**: enrichment for selected games only
 ## 本地运行
 
 ```bash
@@ -97,7 +108,7 @@ components/
   PixelLogo.tsx        # 像素风 Logo
 
 lib/
-  recommend.ts   # 推荐核心：搜索计划 → 候选搜集 → AI 排序 → 补全
+  recommend.ts   # recommendation agent loop, ranking, and enrichment
   gamebrain.ts   # GameBrain客户端（串行限流、额度感知、7天磁盘缓存）
   wikidata.ts    # Wikidata备用客户端
   steam.ts       # Steam Store API 客户端（商店搜索、详情、评价）

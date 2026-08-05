@@ -24,6 +24,19 @@ export interface GameBrainGame {
   short_description?: string;
 }
 
+export interface GameBrainSearchFilter {
+  key: string;
+  values: { value: string }[];
+  connection?: "AND" | "OR";
+}
+
+export interface GameBrainSearchOptions {
+  filters?: GameBrainSearchFilter[];
+  sort?: "computed_rating" | "release_date" | "price";
+  sortOrder?: "asc" | "desc";
+  generateFilterOptions?: boolean;
+}
+
 interface SearchResponse {
   total_results?: number;
   limit?: number;
@@ -33,7 +46,7 @@ interface SearchResponse {
 
 interface CacheRecord {
   savedAt: number;
-  data: SearchResponse;
+  data: unknown;
 }
 
 export class GameBrainUnavailableError extends Error {
@@ -53,9 +66,25 @@ export class GameBrainQuotaError extends Error {
 let requestQueue = Promise.resolve();
 let lastRequestAt = 0;
 let cacheLoaded = false;
+let cacheLoadPromise: Promise<void> | null = null;
 let cache = new Map<string, CacheRecord>();
+const inFlight = new Map<string, Promise<unknown>>();
 let quotaLeft: number | null = null;
 let persistPromise = Promise.resolve();
+
+export interface GameBrainCacheStats {
+  hits: number;
+  misses: number;
+  inFlightHits: number;
+  networkRequests: number;
+  failures: number;
+}
+
+const cacheStats: GameBrainCacheStats = { hits: 0, misses: 0, inFlightHits: 0, networkRequests: 0, failures: 0 };
+
+export function gameBrainCacheStats(): GameBrainCacheStats {
+  return { ...cacheStats };
+}
 
 export function isGameBrainConfigured(): boolean {
   return Boolean(process.env.GAMEBRAIN_API_KEY?.trim());
@@ -63,13 +92,19 @@ export function isGameBrainConfigured(): boolean {
 
 async function ensureCacheLoaded(): Promise<void> {
   if (cacheLoaded) return;
-  cacheLoaded = true;
-  try {
-    const parsed = JSON.parse(await readFile(CACHE_PATH, "utf8")) as Record<string, CacheRecord>;
-    cache = new Map(Object.entries(parsed).filter(([, record]) => Date.now() - record.savedAt < CACHE_TTL));
-  } catch {
-    cache = new Map();
+  if (!cacheLoadPromise) {
+    cacheLoadPromise = (async () => {
+      try {
+        const parsed = JSON.parse(await readFile(CACHE_PATH, "utf8")) as Record<string, CacheRecord>;
+        cache = new Map(Object.entries(parsed).filter(([, record]) => record && typeof record.savedAt === "number" && Date.now() - record.savedAt < CACHE_TTL));
+      } catch {
+        cache = new Map();
+      } finally {
+        cacheLoaded = true;
+      }
+    })();
   }
+  await cacheLoadPromise;
 }
 
 async function persistCache(): Promise<void> {
@@ -91,65 +126,121 @@ async function waitForRequestSlot(): Promise<void> {
   await current;
 }
 
-function platformFilters(platformKeys: string[]): string | undefined {
-  if (platformKeys.length === 0) return undefined;
-  return JSON.stringify([{ key: "platform", values: platformKeys.map((value) => ({ value })), connection: "OR" }]);
+function platformFilters(platformKeys: string[], filters: GameBrainSearchFilter[] = []): string | undefined {
+  const allFilters = [
+    ...(platformKeys.length > 0 ? [{ key: "platform", values: platformKeys.map((value) => ({ value })), connection: "OR" as const }] : []),
+    ...filters,
+  ];
+  return allFilters.length > 0 ? JSON.stringify(allFilters) : undefined;
 }
 
 async function requestGameBrainEndpoint<T>(url: string, cacheKey: string): Promise<T> {
-  if (!isGameBrainConfigured()) throw new GameBrainUnavailableError("服务端尚未配置 GAMEBRAIN_API_KEY");
+  if (!isGameBrainConfigured()) throw new GameBrainUnavailableError("??????? GAMEBRAIN_API_KEY");
   await ensureCacheLoaded();
   const cached = cache.get(cacheKey);
-  if (cached && Date.now() - cached.savedAt < CACHE_TTL) return cached.data as T;
+  if (cached && Date.now() - cached.savedAt < CACHE_TTL) {
+    cacheStats.hits += 1;
+    return cached.data as T;
+  }
   if (quotaLeft !== null && quotaLeft < 1) throw new GameBrainQuotaError();
 
-  await waitForRequestSlot();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20_000);
+  const active = inFlight.get(cacheKey);
+  if (active) {
+    cacheStats.inFlightHits += 1;
+    return await active as T;
+  }
+  cacheStats.misses += 1;
+
+  const request = (async (): Promise<T> => {
+    await waitForRequestSlot();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20_000);
+    try {
+      cacheStats.networkRequests += 1;
+      const response = await fetch(url, {
+        headers: { "x-api-key": process.env.GAMEBRAIN_API_KEY!, "User-Agent": "WanShenMe/1.0", Accept: "application/json" },
+        signal: controller.signal,
+      });
+      const left = Number(response.headers.get("x-api-quota-left"));
+      if (Number.isFinite(left)) quotaLeft = left;
+      if (response.status === 402) throw new GameBrainQuotaError();
+      if (response.status === 429) throw new GameBrainUnavailableError("GameBrain ??????????");
+      if (!response.ok) throw new GameBrainUnavailableError(`GameBrain API ?? ${response.status}`);
+      const data = (await response.json()) as T;
+      cache.set(cacheKey, { savedAt: Date.now(), data });
+      void persistCache();
+      return data;
+    } catch (error) {
+      cacheStats.failures += 1;
+      if (error instanceof GameBrainUnavailableError || error instanceof GameBrainQuotaError) throw error;
+      throw new GameBrainUnavailableError("GameBrain API ??????????");
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+
+  inFlight.set(cacheKey, request as Promise<unknown>);
   try {
-    const response = await fetch(url, {
-      headers: { "x-api-key": process.env.GAMEBRAIN_API_KEY!, "User-Agent": "WanShenMe/1.0", Accept: "application/json" },
-      signal: controller.signal,
-    });
-    const left = Number(response.headers.get("x-api-quota-left"));
-    if (Number.isFinite(left)) quotaLeft = left;
-    if (response.status === 402) throw new GameBrainQuotaError();
-    if (response.status === 429) throw new GameBrainUnavailableError("GameBrain 请求过快，请稍后重试");
-    if (!response.ok) throw new GameBrainUnavailableError(`GameBrain API 错误 ${response.status}`);
-    const data = (await response.json()) as T;
-    cache.set(cacheKey, { savedAt: Date.now(), data: data as SearchResponse });
-    void persistCache();
-    return data;
-  } catch (error) {
-    if (error instanceof GameBrainUnavailableError || error instanceof GameBrainQuotaError) throw error;
-    throw new GameBrainUnavailableError("GameBrain API 请求超时或网络不可用");
+    return await request;
   } finally {
-    clearTimeout(timer);
+    inFlight.delete(cacheKey);
   }
 }
 
-async function searchPage(query: string, platformKeys: string[], offset: number, limit: number): Promise<SearchResponse> {
+async function searchPage(query: string, platformKeys: string[], offset: number, limit: number, options: GameBrainSearchOptions = {}): Promise<SearchResponse> {
   const params = new URLSearchParams({ query, offset: String(offset), limit: String(limit) });
-  const filters = platformFilters(platformKeys);
+  const filters = platformFilters(platformKeys, options.filters);
   if (filters) params.set("filters", filters);
+  if (options.sort) params.set("sort", options.sort);
+  if (options.sortOrder) params.set("sort-order", options.sortOrder);
+  if (options.generateFilterOptions) params.set("generate-filter-options", "true");
   return requestGameBrainEndpoint<SearchResponse>(`${API_BASE}/games?${params.toString()}`, `games:${params.toString()}`);
 }
+
+const SEARCH_PAGE_SIZE = 10;
+const MAX_SEARCH_PAGES = 4;
 
 export async function searchGameBrain(
   query: string,
   platformKeys: string[],
   candidateCount: number,
-  offset = 0
+  offset = 0,
+  options: GameBrainSearchOptions = {}
 ): Promise<GameBrainGame[]> {
-  const pages = Math.max(1, Math.min(4, Math.ceil(candidateCount / 10)));
+  const target = Math.max(1, Math.min(candidateCount, SEARCH_PAGE_SIZE * MAX_SEARCH_PAGES));
   const results: GameBrainGame[] = [];
-  for (let page = 0; page < pages; page++) {
-    const data = await searchPage(query, platformKeys, offset + page * 10, 10);
-    results.push(...(data.results ?? []));
-    if ((data.results ?? []).length < 10) break;
+  let nextOffset = offset;
+  for (let page = 0; page < MAX_SEARCH_PAGES && results.length < target; page++) {
+    const data = await searchPage(query, platformKeys, nextOffset, SEARCH_PAGE_SIZE, options);
+    const pageResults = data.results ?? [];
+    results.push(...pageResults);
+    if (pageResults.length === 0) break;
+
+    // Some deployments cap the requested page size. Prefer the API's reported
+    // limit/total so we can still paginate correctly without wasting a request.
+    const reportedLimit = Number(data.limit);
+    const step = Number.isFinite(reportedLimit) && reportedLimit > 0 ? reportedLimit : pageResults.length;
+    nextOffset += step;
+    const total = Number(data.total_results);
+    if (Number.isFinite(total) && nextOffset >= total) break;
+    // If the server reports a smaller effective page size, keep walking pages
+    // even when total_results is omitted instead of prematurely truncating
+    // a paginated search.
+    if (pageResults.length < SEARCH_PAGE_SIZE && (!Number.isFinite(reportedLimit) || reportedLimit >= SEARCH_PAGE_SIZE)) break;
   }
   const seen = new Set<number>();
   return results.filter((game) => game.id > 0 && game.name && !seen.has(game.id) && seen.add(game.id)).slice(0, candidateCount);
+}
+
+export async function suggestGameBrain(query: string, limit = 5): Promise<GameBrainGame[]> {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+  const params = new URLSearchParams({ query: trimmed, limit: String(Math.max(1, Math.min(10, limit))) });
+  const data = await requestGameBrainEndpoint<{ results?: GameBrainGame[] }>(
+    `${API_BASE}/games/suggestions?${params.toString()}`,
+    `suggestions:${params.toString()}`
+  );
+  return (data.results ?? []).filter((game) => game.id > 0 && game.name).slice(0, limit);
 }
 
 export async function getSimilarGameBrain(gameId: number, limit = 10): Promise<GameBrainGame[]> {

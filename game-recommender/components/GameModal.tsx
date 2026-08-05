@@ -41,7 +41,17 @@ export default function GameModal({ game, onClose }: { game: Game; onClose: () =
       >
         <div className="relative aspect-[460/215] w-full shrink-0 bg-brand-2/10">
           {game.headerImage ? (
-            <img src={game.headerImage} alt={game.name} className="h-full w-full object-cover" />
+            <img
+              src={game.headerImage}
+              alt={game.name}
+              onError={(event) => {
+                const image = event.currentTarget;
+                if (image.dataset.fallbackApplied) return;
+                image.dataset.fallbackApplied = "true";
+                image.src = `/api/game-placeholder?name=${encodeURIComponent(game.name)}`;
+              }}
+              className="h-full w-full object-cover"
+            />
           ) : (
             <div className="bg-brand-gradient flex h-full items-center justify-center px-8 text-center text-xl font-bold text-white">
               {game.name}

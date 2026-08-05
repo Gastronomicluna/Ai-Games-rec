@@ -5,7 +5,7 @@ import ChatDock from "@/components/ChatDock";
 import GameModal from "@/components/GameModal";
 import HomeView from "@/components/HomeView";
 import ResultsView from "@/components/ResultsView";
-import type { ChatMessage, Game, Platform, PreviousRecommendation, RecommendResponse, ReleaseFilter } from "@/lib/types";
+import type { AgentTraceEvent, ChatMessage, Game, Platform, PreviousRecommendation, RecommendResponse, ReleaseFilter } from "@/lib/types";
 
 const STORAGE_KEY = "wanshenme-session-v3";
 
@@ -13,6 +13,7 @@ interface SessionState {
   messages: ChatMessage[];
   games: Game[];
   excludedIds: number[];
+  excludedKeys?: string[];
   platforms: Platform[];
   favoriteGames?: string[];
   releaseFilter?: ReleaseFilter;
@@ -51,7 +52,10 @@ function loadSession(): SessionState | null {
     ? parsed.excludedIds.filter((id): id is number => Number.isInteger(id) && id > 0)
     : [];
   if (messages.length === 0) return null;
-  return { messages, games, excludedIds, platforms, favoriteGames: Array.isArray(parsed.favoriteGames) ? parsed.favoriteGames.filter((value): value is string => typeof value === "string").slice(0, 8) : [], releaseFilter: parsed.releaseFilter === "last1" || parsed.releaseFilter === "last3" || parsed.releaseFilter === "last5" || parsed.releaseFilter === "before2020" || parsed.releaseFilter === "before2010" ? parsed.releaseFilter : "all", count: typeof parsed.count === "number" ? parsed.count : 6 };
+  const excludedKeys = Array.isArray(parsed.excludedKeys)
+    ? parsed.excludedKeys.filter((key): key is string => typeof key === "string" && /^(gamebrain|wikidata|steam):\d+$/.test(key)).slice(-200)
+    : [];
+  return { messages, games, excludedIds, excludedKeys, platforms, favoriteGames: Array.isArray(parsed.favoriteGames) ? parsed.favoriteGames.filter((value): value is string => typeof value === "string").slice(0, 8) : [], releaseFilter: parsed.releaseFilter === "recent" || parsed.releaseFilter === "classic" || parsed.releaseFilter === "last1" || parsed.releaseFilter === "last3" || parsed.releaseFilter === "last5" || parsed.releaseFilter === "before2020" || parsed.releaseFilter === "before2010" ? parsed.releaseFilter : "all", count: typeof parsed.count === "number" ? parsed.count : 6 };
   } catch {
     return null;
   }
@@ -64,8 +68,13 @@ export default function Page() {
   const gamesRef = useRef(games);
   gamesRef.current = games;
   const [excludedIds, setExcludedIds] = useState<number[]>([]);
+  const [excludedKeys, setExcludedKeys] = useState<string[]>([]);
+  const excludedKeysRef = useRef(excludedKeys);
+  excludedKeysRef.current = excludedKeys;
   const [platforms, setPlatforms] = useState<Platform[]>([]);
   const [favoriteGames, setFavoriteGames] = useState<string[]>([]);
+  const favoriteGamesRef = useRef(favoriteGames);
+  favoriteGamesRef.current = favoriteGames;
   const [releaseFilter, setReleaseFilter] = useState<ReleaseFilter>("all");
   const releaseFilterRef = useRef<ReleaseFilter>(releaseFilter);
   releaseFilterRef.current = releaseFilter;
@@ -75,6 +84,7 @@ export default function Page() {
   const countRef = useRef(count);
   countRef.current = count;
   const [loading, setLoading] = useState(false);
+  const [agentTrace, setAgentTrace] = useState<AgentTraceEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Game | null>(null);
   const [hydrated, setHydrated] = useState(false);
@@ -87,7 +97,10 @@ export default function Page() {
       setMessages(session.messages);
       setGames(session.games);
             setExcludedIds(session.excludedIds);
+      setExcludedKeys(session.excludedKeys ?? session.games.map((game) => `${game.source}:${game.id}`));
       setPlatforms(session.platforms ?? []);
+      setFavoriteGames(session.favoriteGames ?? []);
+      setReleaseFilter(session.releaseFilter ?? "all");
       setCount(session.count ?? 6);
       setView("results");
     }
@@ -100,9 +113,9 @@ export default function Page() {
     if (messages.length === 0) {
       localStorage.removeItem(STORAGE_KEY);
     } else {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ messages, games, excludedIds, platforms, favoriteGames, releaseFilter, count }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ messages, games, excludedIds, excludedKeys, platforms, favoriteGames, releaseFilter, count }));
     }
-  }, [messages, games, excludedIds, platforms, favoriteGames, releaseFilter, count, hydrated]);
+  }, [messages, games, excludedIds, excludedKeys, platforms, favoriteGames, releaseFilter, count, hydrated]);
 
   const requestRecommend = useCallback(
     async (
@@ -118,17 +131,20 @@ export default function Page() {
       const requestVersion = ++requestVersionRef.current;
       setLoading(true);
       setError(null);
+      setAgentTrace([]);
 
       try {
         const response = await fetch("/api/recommend", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
           body: JSON.stringify({
             messages: nextMessages,
             excludeIds: nextExcluded,
+            excludeKeys: appendExcluded ? excludedKeysRef.current : [],
             platforms: platformsRef.current,
             count: countRef.current,
             releaseFilter: releaseFilterRef.current,
+            favoriteGames: favoriteGamesRef.current,
             previousGames: contextGames.slice(0, 40).map((game): PreviousRecommendation => ({
               id: game.id,
               name: game.name,
@@ -141,18 +157,53 @@ export default function Page() {
           }),
           signal: controller.signal,
         });
-        const data = await response.json().catch(() => null);
-        if (!response.ok) throw new Error(data?.error ?? "推荐失败，请稍后重试");
-        const result = data as RecommendResponse;
+        let result: RecommendResponse | null = null;
+        if (!response.ok) {
+          const data = await response.json().catch(() => null);
+          throw new Error(data?.error ?? "Request failed");
+        }
+        const contentType = response.headers.get("content-type") ?? "";
+        if (contentType.includes("text/event-stream") && response.body) {
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const chunks = buffer.split("\n\n");
+            buffer = chunks.pop() ?? "";
+            for (const chunk of chunks) {
+              const eventType = chunk.match(/^event:\s*(.+)$/m)?.[1];
+              const payload = chunk.match(/^data:\s*(.+)$/m)?.[1];
+              if (!eventType || !payload) continue;
+              const parsed = JSON.parse(payload);
+              if (eventType === "progress") {
+                setAgentTrace((events) => [...events.slice(-11), parsed as AgentTraceEvent]);
+              } else if (eventType === "result") {
+                result = parsed as RecommendResponse;
+              } else if (eventType === "error") {
+                throw new Error(parsed?.error ?? "Request failed");
+              }
+            }
+          }
+        } else {
+          result = await response.json() as RecommendResponse;
+        }
+        if (!result) throw new Error("Recommendation stream returned no result");
         if (!Array.isArray(result.games) || result.games.length === 0) {
-          throw new Error("这次没有找到合适的游戏，请换个描述重试");
+          throw new Error("No suitable games found for this request.");
         }
         if (requestVersion !== requestVersionRef.current) return false;
 
         setGames(result.games);
         setMessages([...nextMessages, { role: "assistant", content: result.reply }]);
         const batchIds = result.games.map((game) => game.id);
+        const batchKeys = result.games.map((game) => `${game.source}:${game.id}`);
+        const nextKeys = appendExcluded ? Array.from(new Set([...excludedKeysRef.current, ...batchKeys])) : batchKeys;
+        excludedKeysRef.current = nextKeys;
         setExcludedIds(appendExcluded ? Array.from(new Set([...nextExcluded, ...batchIds])) : batchIds);
+        setExcludedKeys(nextKeys);
         setView("results");
         return true;
       } catch (caught) {
@@ -194,6 +245,7 @@ export default function Page() {
     ];
     platformsRef.current = nextPlatforms;
     releaseFilterRef.current = nextReleaseFilter;
+    favoriteGamesRef.current = nextFavorites;
     setPlatforms(nextPlatforms);
     setReleaseFilter(nextReleaseFilter);
     setFavoriteGames(nextFavorites);
@@ -208,9 +260,16 @@ export default function Page() {
     setMessages([]);
     setGames([]);
         setExcludedIds([]);
+    setExcludedKeys([]);
+    excludedKeysRef.current = [];
     setPlatforms([]);
+    setFavoriteGames([]);
+    favoriteGamesRef.current = [];
+    setReleaseFilter("all");
+    releaseFilterRef.current = "all";
     setSelected(null);
     setLoading(false);
+    setAgentTrace([]);
     setError(null);
     setView("home");
   }, []);
@@ -218,7 +277,7 @@ export default function Page() {
   return (
     <>
       {view === "home" ? (
-        <HomeView loading={loading} error={error} platforms={platforms} onPlatformsChange={setPlatforms} favoriteGames={favoriteGames} onFavoriteGamesChange={setFavoriteGames} releaseFilter={releaseFilter} onReleaseFilterChange={setReleaseFilter} count={count} onCountChange={setCount} onSubmit={handleSend} />
+        <HomeView loading={loading} error={error} agentTrace={agentTrace} platforms={platforms} onPlatformsChange={setPlatforms} favoriteGames={favoriteGames} onFavoriteGamesChange={setFavoriteGames} releaseFilter={releaseFilter} onReleaseFilterChange={setReleaseFilter} count={count} onCountChange={setCount} onSubmit={handleSend} />
       ) : (
         <div className="flex min-h-screen flex-col">
           <div className="flex-1">
@@ -237,6 +296,7 @@ export default function Page() {
               onApplyPreferences={handleApplyPreferences}
               onRefreshBatch={handleRefreshBatch}
               onSelectGame={setSelected}
+              agentTrace={agentTrace}
             />
           </div>
           <ChatDock messages={messages} loading={loading} onSend={handleSend} onReset={handleReset} />

@@ -23,6 +23,7 @@ export default function GameSearchInput({
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const resultCacheRef = useRef(new Map<string, SearchResult[]>());
 
   const search = useCallback(async (term: string) => {
     if (term.trim().length < 2) {
@@ -31,17 +32,28 @@ export default function GameSearchInput({
       return;
     }
     abortRef.current?.abort();
+    const cacheKey = term.trim().toLocaleLowerCase();
+    const cachedResults = resultCacheRef.current.get(cacheKey);
+    if (cachedResults) {
+      setResults(cachedResults.filter((result) => !chips.includes(result.name)));
+      setOpen(cachedResults.length > 0);
+      setActiveIdx(0);
+      setLoading(false);
+      return;
+    }
     const controller = new AbortController();
     abortRef.current = controller;
     setLoading(true);
     try {
-      const res = await fetch(`/api/search-games?q=${encodeURIComponent(term.trim())}`, {
+      const res = await fetch(`/api/search-games?q=${encodeURIComponent(term.trim())}&limit=20`, {
         signal: controller.signal,
       });
       if (!res.ok) throw new Error("search failed");
       const data = await res.json();
       if (!controller.signal.aborted) {
-        setResults((data.results ?? []).filter((r: SearchResult) => !chips.includes(r.name)));
+        const nextResults = (data.results ?? []) as SearchResult[];
+        resultCacheRef.current.set(cacheKey, nextResults);
+        setResults(nextResults.filter((result) => !chips.includes(result.name)));
         setOpen(true);
         setActiveIdx(0);
       }

@@ -37,3 +37,20 @@ test("chatCompletionJson retries malformed JSON output", async () => {
   assert.deepEqual(result, { value: 42 });
   assert.equal(calls, 2);
 });
+
+
+test("AI metrics record request and token usage", async () => {
+  const before = ai.aiUsageStats();
+  globalThis.fetch = async () => Response.json({
+    usage: { prompt_tokens: 12, completion_tokens: 7, total_tokens: 19, prompt_tokens_details: { cached_tokens: 3 } },
+    choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+  });
+
+  assert.equal(await ai.chatCompletion([{ role: "user", content: "metrics" }], { maxTokens: 32 }), "ok");
+  const delta = ai.diffAiUsage(before);
+  assert.equal(delta.requests, 1);
+  assert.equal(delta.promptTokens, 12);
+  assert.equal(delta.completionTokens, 7);
+  assert.equal(delta.totalTokens, 19);
+  assert.equal(delta.cachedTokens, 3);
+});

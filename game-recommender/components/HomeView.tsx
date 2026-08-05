@@ -2,9 +2,10 @@
 
 import { useState } from "react";
 import { ArrowRight, Database, Gamepad2, MessagesSquare, Monitor, RefreshCw, Sparkles } from "lucide-react";
-import type { Platform, ReleaseFilter } from "@/lib/types";
+import type { AgentTraceEvent, Platform, ReleaseFilter } from "@/lib/types";
 import GameSearchInput from "./GameSearchInput";
 import PixelLogo from "./PixelLogo";
+import AgentTracePanel from "./AgentTracePanel";
 
 const EXAMPLE_PROMPTS = [
   "我想要一个双人合作的游戏",
@@ -29,10 +30,11 @@ const PIXELS = [
 
 const RELEASE_OPTIONS: { key: ReleaseFilter; label: string }[] = [
   { key: "all", label: "不限" },
+  { key: "recent", label: "近期（近5年）" },
+  { key: "classic", label: "经典（2020年前）" },
   { key: "last1", label: "近1年" },
   { key: "last3", label: "近3年" },
   { key: "last5", label: "近5年" },
-  { key: "before2020", label: "2020年前" },
   { key: "before2010", label: "2010年前" },
 ];
 
@@ -45,6 +47,7 @@ const PLATFORM_OPTIONS: { key: Platform; label: string; icon: typeof Monitor }[]
 export default function HomeView({
   loading,
   error,
+  agentTrace,
   platforms,
   onPlatformsChange,
   count,
@@ -57,6 +60,7 @@ export default function HomeView({
 }: {
   loading: boolean;
   error: string | null;
+  agentTrace: AgentTraceEvent[];
   platforms: Platform[];
   onPlatformsChange: (p: Platform[]) => void;
   count: number;
@@ -97,7 +101,7 @@ export default function HomeView({
 
       <header className="mx-auto flex w-full max-w-6xl items-center gap-2 px-6 pt-6">
         <PixelLogo size={26} />
-        <span className="text-lg font-bold tracking-wide">玩什么</span>
+        <span className="text-lg font-bold tracking-wide">游戏雷达</span>
         <span className="rounded border border-brand-2 px-1.5 py-0.5 text-xs text-brand-2-strong">AI 游戏推荐</span>
       </header>
 
@@ -156,6 +160,7 @@ export default function HomeView({
         )}
 
         <div className="mt-4 w-full">
+          <AgentTracePanel events={agentTrace} loading={loading} />
           <GameSearchInput chips={chips} onChipsChange={onFavoriteGamesChange} />
         </div>
 

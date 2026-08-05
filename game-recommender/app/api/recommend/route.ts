@@ -1,6 +1,6 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
 import { recommend } from "@/lib/recommend";
-import type { ChatMessage, Platform, PreviousRecommendation, ReleaseFilter } from "@/lib/types";
+import type { AgentTraceEvent, ChatMessage, Platform, PreviousRecommendation, ReleaseFilter } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -23,7 +23,7 @@ function publicError(error: unknown): string {
 }
 
 export async function POST(request: NextRequest) {
-  let body: { messages?: unknown; excludeIds?: unknown; platforms?: unknown; count?: unknown; previousGames?: unknown; releaseFilter?: unknown };
+  let body: { messages?: unknown; excludeIds?: unknown; excludeKeys?: unknown; platforms?: unknown; count?: unknown; previousGames?: unknown; releaseFilter?: unknown; favoriteGames?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -48,12 +48,19 @@ export async function POST(request: NextRequest) {
       : []
   );
 
-  const releaseFilter: ReleaseFilter = body.releaseFilter === "last1" || body.releaseFilter === "last3" || body.releaseFilter === "last5" || body.releaseFilter === "before2020" || body.releaseFilter === "before2010" ? body.releaseFilter : "all";
+  const releaseFilter: ReleaseFilter = body.releaseFilter === "recent" || body.releaseFilter === "classic" || body.releaseFilter === "last1" || body.releaseFilter === "last3" || body.releaseFilter === "last5" || body.releaseFilter === "before2020" || body.releaseFilter === "before2010" ? body.releaseFilter : "all";
 
   const excludeIds = Array.isArray(body.excludeIds)
     ? body.excludeIds.filter((value): value is number => Number.isInteger(value) && value > 0).slice(-200)
     : [];
 
+  const excludeKeys = Array.isArray(body.excludeKeys)
+    ? body.excludeKeys.filter((value): value is string => typeof value === "string" && /^(gamebrain|wikidata|steam):\d+$/.test(value)).slice(-200)
+    : [];
+
+  const favoriteGames = Array.isArray(body.favoriteGames)
+    ? body.favoriteGames.filter((value): value is string => typeof value === "string" && value.trim().length > 0).map((value) => value.trim().slice(0, 160)).slice(0, 8)
+    : [];
 
   const previousGames: PreviousRecommendation[] = Array.isArray(body.previousGames)
     ? body.previousGames.slice(0, 40).flatMap((value): PreviousRecommendation[] => {
@@ -72,12 +79,46 @@ export async function POST(request: NextRequest) {
       })
     : [];
 
-  try {
-    const count = typeof body.count === "number" && [6,10,15,20].includes(body.count) ? body.count : 6;
-  const result = await recommend(messages, excludeIds, platforms, count, previousGames, releaseFilter);
-    return NextResponse.json(result);
-  } catch (error) {
-    console.error("[recommend]", error);
-    return NextResponse.json({ error: publicError(error) }, { status: 500 });
+  const count = typeof body.count === "number" && [6,10,15,20].includes(body.count) ? body.count : 6;
+  const streamRequested = request.headers.get("accept")?.includes("text/event-stream") || request.nextUrl.searchParams.get("stream") === "1";
+
+  if (!streamRequested) {
+    try {
+      const result = await recommend(messages, excludeIds, platforms, count, previousGames, releaseFilter, favoriteGames, excludeKeys);
+      return NextResponse.json(result);
+    } catch (error) {
+      console.error("[recommend]", error);
+      return NextResponse.json({ error: publicError(error) }, { status: 500 });
+    }
   }
+
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const send = (event: string, data: unknown) => controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+      const emit = (event: Omit<AgentTraceEvent, "id" | "timestamp">) => {
+        send("progress", { ...event, id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, timestamp: Date.now() });
+      };
+      void (async () => {
+        try {
+          emit({ stage: "intent", title: "Request accepted", detail: "Starting the recommendation agent." });
+          const result = await recommend(messages, excludeIds, platforms, count, previousGames, releaseFilter, favoriteGames, excludeKeys, emit);
+          send("result", result);
+        } catch (error) {
+          console.error("[recommend]", error);
+          send("error", { error: publicError(error) });
+        } finally {
+          controller.close();
+        }
+      })();
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    },
+  });
 }

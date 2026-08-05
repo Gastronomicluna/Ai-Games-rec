@@ -45,4 +45,16 @@ test("release filters match relative and fixed year ranges", () => {
   assert.equal(preferences.matchesReleaseFilter("2010-01-01", "before2010"), false);
   assert.equal(preferences.matchesReleaseFilter("2009-12-31", "before2010"), true);
   assert.equal(preferences.matchesReleaseFilter("2024-01-01", "all"), true);
+  assert.equal(preferences.matchesReleaseFilter("2024-01-01", "recent"), true);
+  assert.equal(preferences.matchesReleaseFilter("2019-12-31", "classic"), true);
+  assert.equal(preferences.matchesReleaseFilter("2024-01-01", "classic"), false);
+  assert.equal(preferences.matchesReleaseFilter(undefined, "recent"), false);
+});
+
+
+test("calendar-year near-three filter includes the current year", () => {
+  const currentYear = new Date().getFullYear();
+  assert.equal(preferences.matchesReleaseFilter(String(currentYear), "last3"), true);
+  assert.equal(preferences.matchesReleaseFilter(String(currentYear - 2), "last3"), true);
+  assert.equal(preferences.matchesReleaseFilter(String(currentYear - 3), "last3"), false);
 });

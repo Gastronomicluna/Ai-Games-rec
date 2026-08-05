@@ -11,6 +11,66 @@ interface ChatOptions {
   model?: string;
 }
 
+export interface AiUsageStats {
+  requests: number;
+  retries: number;
+  failures: number;
+  jsonRetries: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cachedTokens: number;
+}
+
+const usageStats: AiUsageStats = {
+  requests: 0,
+  retries: 0,
+  failures: 0,
+  jsonRetries: 0,
+  promptTokens: 0,
+  completionTokens: 0,
+  totalTokens: 0,
+  cachedTokens: 0,
+};
+
+function numeric(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function recordUsage(data: unknown): void {
+  if (!data || typeof data !== "object") return;
+  const usage = (data as { usage?: Record<string, unknown> }).usage;
+  if (!usage) return;
+  const promptTokens = numeric(usage.prompt_tokens ?? usage.input_tokens);
+  const completionTokens = numeric(usage.completion_tokens ?? usage.output_tokens);
+  const totalTokens = numeric(usage.total_tokens) || promptTokens + completionTokens;
+  const details = usage.prompt_tokens_details ?? usage.input_tokens_details;
+  const cachedTokens = details && typeof details === "object"
+    ? numeric((details as Record<string, unknown>).cached_tokens ?? (details as Record<string, unknown>).cache_read_input_tokens)
+    : 0;
+  usageStats.promptTokens += promptTokens;
+  usageStats.completionTokens += completionTokens;
+  usageStats.totalTokens += totalTokens;
+  usageStats.cachedTokens += cachedTokens;
+}
+
+export function aiUsageStats(): AiUsageStats {
+  return { ...usageStats };
+}
+
+export function diffAiUsage(before: AiUsageStats, after = aiUsageStats()): AiUsageStats {
+  return {
+    requests: after.requests - before.requests,
+    retries: after.retries - before.retries,
+    failures: after.failures - before.failures,
+    jsonRetries: after.jsonRetries - before.jsonRetries,
+    promptTokens: after.promptTokens - before.promptTokens,
+    completionTokens: after.completionTokens - before.completionTokens,
+    totalTokens: after.totalTokens - before.totalTokens,
+    cachedTokens: after.cachedTokens - before.cachedTokens,
+  };
+}
+
 function messageText(value: unknown): string {
   if (typeof value === "string") return value.trim();
   if (!Array.isArray(value)) return "";
@@ -37,9 +97,11 @@ export async function chatCompletion(messages: RelayMessage[], opts: ChatOptions
   let maxTokens = opts.maxTokens ?? 4000;
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) usageStats.retries += 1;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 90_000);
     try {
+      usageStats.requests += 1;
       const response = await fetch(`${baseUrl}/v1/chat/completions`, {
         method: "POST",
         headers: {
@@ -56,6 +118,7 @@ export async function chatCompletion(messages: RelayMessage[], opts: ChatOptions
       });
 
       if (!response.ok) {
+        usageStats.failures += 1;
         const text = await response.text().catch(() => "");
         const error = new Error(`AI 接口错误 ${response.status}: ${text.slice(0, 200)}`);
         if ((response.status === 408 || response.status === 429 || response.status >= 500) && attempt === 0) {
@@ -67,6 +130,7 @@ export async function chatCompletion(messages: RelayMessage[], opts: ChatOptions
       }
 
       const data = await response.json();
+      recordUsage(data);
       const content = messageText(data?.choices?.[0]?.message?.content);
       if (content) return content;
 
@@ -79,6 +143,7 @@ export async function chatCompletion(messages: RelayMessage[], opts: ChatOptions
       }
     } catch (error) {
       lastError = error;
+      if (!(error instanceof Error && error.message.startsWith("AI ????"))) usageStats.failures += 1;
       if (attempt === 0 && (!(error instanceof Error) || error.name === "AbortError" || /fetch|network|timeout/i.test(error.message))) {
         await sleep(800);
         continue;
@@ -105,7 +170,10 @@ export async function chatCompletionJson<T>(messages: RelayMessage[], opts: Chat
       return extractJson<T>(output);
     } catch (error) {
       lastError = error;
-      if (attempt === 0) continue;
+      if (attempt === 0) {
+        usageStats.jsonRetries += 1;
+        continue;
+      }
     }
   }
   console.error("[chatCompletionJson] invalid JSON after retry", lastError);

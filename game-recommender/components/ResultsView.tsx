@@ -3,17 +3,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { Gamepad2, Monitor, RefreshCw } from "lucide-react";
 import { sortGames, type SortMode } from "@/lib/game-utils";
-import type { Game, Platform, ReleaseFilter } from "@/lib/types";
+import type { AgentTraceEvent, Game, Platform, ReleaseFilter } from "@/lib/types";
 import GameSearchInput from "./GameSearchInput";
 import GameCard from "./GameCard";
 import PixelLogo from "./PixelLogo";
+import AgentTracePanel from "./AgentTracePanel";
 
 const RELEASE_OPTIONS: { key: ReleaseFilter; label: string }[] = [
   { key: "all", label: "不限" },
+  { key: "recent", label: "近期（近5年）" },
+  { key: "classic", label: "经典（2020年前）" },
   { key: "last1", label: "近1年" },
   { key: "last3", label: "近3年" },
   { key: "last5", label: "近5年" },
-  { key: "before2020", label: "2020年前" },
   { key: "before2010", label: "2010年前" },
 ];
 
@@ -48,6 +50,7 @@ export default function ResultsView({
   onApplyPreferences,
   releaseFilter,
   onReleaseFilterChange,
+  agentTrace,
 }: {
   games: Game[];
   loading: boolean;
@@ -63,6 +66,7 @@ export default function ResultsView({
   onApplyPreferences: (favoriteGames: string[], platforms: Platform[], releaseFilter: ReleaseFilter) => void;
   releaseFilter: ReleaseFilter;
   onReleaseFilterChange: (filter: ReleaseFilter) => void;
+  agentTrace: AgentTraceEvent[];
 }) {
   const [sort, setSort] = useState<SortMode>("match");
   const [step, setStep] = useState(0);
@@ -81,7 +85,7 @@ export default function ResultsView({
       <header className="flex items-center justify-between py-4">
         <div className="flex items-center gap-2">
           <PixelLogo size={22} />
-          <span className="text-base font-bold">玩什么</span>
+          <span className="text-base font-bold">游戏雷达</span>
           <span className="hidden rounded border border-brand-2 px-1.5 py-0.5 text-xs text-brand-2-strong sm:inline">
             AI 游戏推荐
           </span>
@@ -177,6 +181,8 @@ export default function ResultsView({
       {error && (
         <p className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-600">{error}</p>
       )}
+
+      <AgentTracePanel events={agentTrace} loading={loading} />
 
       {loading ? (
         <>

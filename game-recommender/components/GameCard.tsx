@@ -25,6 +25,12 @@ export default function GameCard({ game, onSelect }: { game: Game; onSelect: (g:
             src={game.headerImage}
             alt={game.name}
             loading="lazy"
+            onError={(event) => {
+              const image = event.currentTarget;
+              if (image.dataset.fallbackApplied) return;
+              image.dataset.fallbackApplied = "true";
+              image.src = `/api/game-placeholder?name=${encodeURIComponent(game.name)}`;
+            }}
             className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.04]"
           />
         ) : (

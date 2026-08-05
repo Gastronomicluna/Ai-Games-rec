@@ -7,6 +7,19 @@ const cache = new Map<string, { t: number; data: unknown }>();
 let requestQueue = Promise.resolve();
 let lastRequestAt = 0;
 
+export interface WikidataCacheStats {
+  hits: number;
+  misses: number;
+  networkRequests: number;
+  failures: number;
+}
+
+const cacheStats: WikidataCacheStats = { hits: 0, misses: 0, networkRequests: 0, failures: 0 };
+
+export function wikidataCacheStats(): WikidataCacheStats {
+  return { ...cacheStats };
+}
+
 export class WikidataUnavailableError extends Error {
   constructor(message = "Wikidata 游戏库当前不可用") {
     super(message);
@@ -90,13 +103,18 @@ async function waitForRateSlot(): Promise<void> {
 
 async function fetchJson<T>(url: string, timeoutMs = 15_000, retries = 2): Promise<T> {
   const cached = cache.get(url);
-  if (cached && Date.now() - cached.t < CACHE_TTL) return cached.data as T;
+  if (cached && Date.now() - cached.t < CACHE_TTL) {
+    cacheStats.hits += 1;
+    return cached.data as T;
+  }
+  cacheStats.misses += 1;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     await waitForRateSlot();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
+      cacheStats.networkRequests += 1;
       const response = await fetch(url, {
         headers: { Accept: "application/json", "User-Agent": USER_AGENT },
         signal: controller.signal,
@@ -111,6 +129,7 @@ async function fetchJson<T>(url: string, timeoutMs = 15_000, retries = 2): Promi
       cache.set(url, { t: Date.now(), data });
       return data;
     } catch (error) {
+      cacheStats.failures += 1;
       if (error instanceof WikidataUnavailableError) throw error;
       if (attempt === retries) throw new WikidataUnavailableError("Wikidata API 请求超时或网络不可用");
     } finally {
