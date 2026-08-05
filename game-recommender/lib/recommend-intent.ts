@@ -76,7 +76,7 @@ export function releaseConstraintFromFilter(filter: ReleaseFilter, now = new Dat
     return { from: null, to, includeUnknown: false, source: "ui", label: formatLabel(null, to) };
   }
   if (filter === "last1") {
-    const from = isoYear(currentYear);
+    const from = isoYear(currentYear - 1);
     return { from, to: null, includeUnknown: false, source: "ui", label: formatLabel(from, null) };
   }
   if (filter === "last3") {

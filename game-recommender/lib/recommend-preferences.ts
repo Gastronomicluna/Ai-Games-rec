@@ -61,7 +61,7 @@ export function matchesReleaseFilter(value: number | string | null | undefined, 
   const currentYear = new Date().getFullYear();
   if (filter === "recent") return year >= currentYear - 4;
   if (filter === "classic") return year < 2020;
-  if (filter === "last1") return year >= currentYear;
+  if (filter === "last1") return year >= currentYear - 1;
   if (filter === "last3") return year >= currentYear - 2;
   if (filter === "last5") return year >= currentYear - 4;
   if (filter === "before2020") return year < 2020;

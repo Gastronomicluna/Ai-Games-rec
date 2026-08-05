@@ -338,8 +338,11 @@ async function gatherGameBrainCandidates(
   const franchiseQueries = strategy === "franchise" || intent?.recencyPreference === "prefer_newest"
     ? lookupReferences.map(franchiseQuery).filter((query): query is string => Boolean(query))
     : [];
-  const queries = uniqueTerms([...baseQueries, ...franchiseQueries], 3);
-  const branchTarget = Math.min(20, Math.ceil(target / queries.length) + 5);
+  const supplementaryQueries = strategy === "catalog" || strategy === "newest"
+    ? [...plan.keywords.slice(0, 2), ...plan.titles.slice(0, 2)]
+    : [];
+  const queries = uniqueTerms([...baseQueries, ...franchiseQueries, ...supplementaryQueries], 3);
+  const branchTarget = Math.min(30, Math.max(10, Math.ceil(target / queries.length) + 5));
   const currentYear = new Date().getFullYear();
   const releaseFilterValues = strategy === "newest" || intent?.recencyPreference === "prefer_newest"
     ? [{ key: "release_date", values: [{ value: "last_5_years" }], connection: "OR" as const }]
@@ -927,7 +930,8 @@ async function gatherAgentCandidates(
     }
   }
 
-  if (candidates.length < count) {
+  const eligibleGameBrainCandidates = candidates.filter((candidate) => candidateMatchesIntent(candidate, intent)).length;
+  if (eligibleGameBrainCandidates < count) {
     const fallbackStarted = Date.now();
     const fallback = steamOnly
       ? await gatherSteamCandidates(plan, excludeIds, STEAM_CANDIDATE_CAP, releaseFilter)

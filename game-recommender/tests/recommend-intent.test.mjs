@@ -64,3 +64,12 @@ test("near-three-years uses the current year plus the two preceding calendar yea
   assert.equal(intent.matchesReleaseConstraint("2023-12-31", constraint), false);
 });
 
+
+
+test("near-one-year is a rolling year window that includes the current and previous year", () => {
+  const constraint = intent.releaseConstraintFromFilter("last1", new Date("2026-08-05T00:00:00Z"));
+  assert.equal(constraint.from, "2025-01-01");
+  assert.equal(intent.matchesReleaseConstraint("2026-01-01", constraint), true);
+  assert.equal(intent.matchesReleaseConstraint("2025-01-01", constraint), true);
+  assert.equal(intent.matchesReleaseConstraint("2024-12-31", constraint), false);
+});

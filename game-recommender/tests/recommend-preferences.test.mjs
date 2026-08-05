@@ -58,3 +58,11 @@ test("calendar-year near-three filter includes the current year", () => {
   assert.equal(preferences.matchesReleaseFilter(String(currentYear - 2), "last3"), true);
   assert.equal(preferences.matchesReleaseFilter(String(currentYear - 3), "last3"), false);
 });
+
+
+test("near-one-year includes current and previous calendar year", () => {
+  const currentYear = new Date().getFullYear();
+  assert.equal(preferences.matchesReleaseFilter(String(currentYear), "last1"), true);
+  assert.equal(preferences.matchesReleaseFilter(String(currentYear - 1), "last1"), true);
+  assert.equal(preferences.matchesReleaseFilter(String(currentYear - 2), "last1"), false);
+});
