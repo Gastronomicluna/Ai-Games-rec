@@ -18,7 +18,9 @@ globalThis.fetch = async (input, init) => {
     return Response.json({ results: [{ id: 42, name: "Fixture Game", year: 2024, genre: "Action Roguelike" }] }, { headers: { "x-api-quota-left": "46" } });
   }
   const offset = Number(url.searchParams.get("offset"));
-  const results = Array.from({ length: 10 }, (_, index) => ({
+  const sparse = url.searchParams.get("query") === "Sparse Fixture";
+  const pageSize = sparse ? 4 : 10;
+  const results = Array.from({ length: pageSize }, (_, index) => ({
     id: offset + index + 1,
     name: `Fixture ${offset + index + 1}`,
     image: `https://img.gamebrain.co/games/fixture-${offset + index + 1}.jpg`,
@@ -27,7 +29,7 @@ globalThis.fetch = async (input, init) => {
     short_description: "Fixture description",
   }));
   return Response.json(
-    { total_results: 30, limit: 10, offset, results },
+    { total_results: sparse ? 8 : 30, limit: pageSize, offset, results },
     { headers: { "x-api-quota-request": "1", "x-api-quota-used": String(calls.length), "x-api-quota-left": String(50 - calls.length) } }
   );
 };
@@ -54,16 +56,20 @@ test("GameBrain repeated search uses cache without spending quota", async () => 
 
 
 test("GameBrain Similar endpoint uses the shared quota client", async () => {
+  const before = calls.length;
   const similar = await gamebrain.getSimilarGameBrain(42, 10);
   assert.equal(similar[0].id, 99);
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length - before, 1);
 });
 
 test("GameBrain Suggestions resolves partial reference titles", async () => {
+  const before = calls.length;
+  const quotaBefore = gamebrain.gameBrainCacheStats().quotaTokens;
   const suggestions = await gamebrain.suggestGameBrain("Fixture", 5);
   assert.equal(suggestions[0].id, 42);
   assert.equal(suggestions[0].genre, "Action Roguelike");
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length - before, 1);
+  assert.ok(Math.abs(gamebrain.gameBrainCacheStats().quotaTokens - quotaBefore - 0.1) < 1e-9);
 });
 
 
@@ -76,4 +82,31 @@ test("concurrent identical GameBrain suggestions share one request", async () =>
   assert.equal(first[0].id, 42);
   assert.deepEqual(second, first);
   assert.equal(calls.length - before, 1);
+});
+
+test("GameBrain stops after page one once the requested recommendation count is covered", async () => {
+  const before = calls.length;
+  const games = await gamebrain.searchGameBrain("One Page Fixture", [], 20, 0, { minimumResults: 6, maxPages: 2 });
+  assert.equal(games.length, 10);
+  assert.equal(calls.length - before, 1);
+});
+
+test("GameBrain requests page two only when page one is short", async () => {
+  const before = calls.length;
+  const games = await gamebrain.searchGameBrain("Sparse Fixture", [], 20, 0, { minimumResults: 6, maxPages: 2 });
+  assert.equal(games.length, 8);
+  assert.equal(calls.length - before, 2);
+});
+
+test("multiple searches share one hard page-token budget", async () => {
+  const before = calls.length;
+  const budget = { remaining: 3, used: 0 };
+  const first = await gamebrain.searchGameBrain("Budget Round One", [], 20, 0, { maxPages: 2, requestBudget: budget });
+  const second = await gamebrain.searchGameBrain("Budget Round Two", [], 20, 0, { maxPages: 2, requestBudget: budget });
+  const blocked = await gamebrain.searchGameBrain("Budget Round Three", [], 20, 0, { maxPages: 2, requestBudget: budget });
+  assert.equal(first.length, 20);
+  assert.equal(second.length, 10);
+  assert.equal(blocked.length, 0);
+  assert.deepEqual(budget, { remaining: 0, used: 3 });
+  assert.equal(calls.length - before, 3);
 });

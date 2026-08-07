@@ -173,7 +173,9 @@ export async function searchStore(query: string, count = 8): Promise<StoreSearch
   const url = `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(
     query
   )}&l=schinese&cc=cn`;
-  const data = await fetchJson<{ items?: StoreSearchItem[] }>(url);
+  // Search is supplemental and often fans out across many candidates. Prefer
+  // a quick miss over retrying one slow Steam edge request for ~25 seconds.
+  const data = await fetchJson<{ items?: StoreSearchItem[] }>(url, 7_000, 0);
   if (!data?.items) return [];
   return data.items
     .filter((it): it is StoreSearchItem & { id: number } => it.type === "app" && typeof it.id === "number")
@@ -190,7 +192,7 @@ const DETAIL_FILTERS =
 
 export async function getAppData(appid: number): Promise<SteamAppData | null> {
   const url = `https://store.steampowered.com/api/appdetails?appids=${appid}&l=schinese&cc=cn&filters=${DETAIL_FILTERS}`;
-  const data = await fetchJson<Record<string, { success: boolean; data?: SteamAppData }>>(url);
+  const data = await fetchJson<Record<string, { success: boolean; data?: SteamAppData }>>(url, 8_000, 0);
   const entry = data?.[String(appid)];
   if (!entry?.success || !entry.data) return null;
   return entry.data;

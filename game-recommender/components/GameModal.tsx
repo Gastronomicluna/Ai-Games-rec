@@ -4,7 +4,6 @@ import { useEffect } from "react";
 import {
   Building2,
   Calendar,
-  Clock3,
   ExternalLink,
   MonitorSmartphone,
   Sparkles,
@@ -83,7 +82,6 @@ export default function GameModal({ game, onClose }: { game: Game; onClose: () =
             <Meta icon={Users} label="游玩方式" value={game.playerModes.join("、") || "未知"} />
             <Meta icon={MonitorSmartphone} label="平台" value={game.platformNames.join(" / ") || "未知"} />
             <Meta icon={Calendar} label="发售日期" value={game.releaseDate} />
-            <Meta icon={Clock3} label="平均游玩时长" value={game.playtimeHours === null ? "暂无数据" : `约 ${game.playtimeHours} 小时`} />
             <Meta icon={Building2} label="开发商" value={game.developers.join("、") || "未知"} />
             <Meta icon={Building2} label="发行商" value={game.publishers.join("、") || "未知"} />
           </div>
@@ -95,6 +93,26 @@ export default function GameModal({ game, onClose }: { game: Game; onClose: () =
               </span>
             ))}
           </div>
+
+          {game.webSources && game.webSources.length > 0 && (
+            <div className="rounded-lg border border-ink/10 bg-paper/50 px-4 py-3">
+              <p className="mb-2 text-xs font-semibold text-ink/55">联网参考来源</p>
+              <div className="flex flex-col gap-1.5">
+                {game.webSources.slice(0, 3).map((source) => (
+                  <a
+                    key={source.url}
+                    href={source.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center gap-1.5 text-sm text-brand-2-strong hover:underline"
+                  >
+                    <ExternalLink size={13} className="shrink-0" />
+                    <span className="truncate">{source.title || source.domain}</span>
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="mt-1 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-ink/10 bg-paper/60 px-4 py-3.5">
             <div className="flex flex-wrap items-center gap-4">

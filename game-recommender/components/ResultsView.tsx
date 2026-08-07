@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Gamepad2, Monitor, RefreshCw } from "lucide-react";
+import { Gamepad2, Monitor, RefreshCw, Smartphone } from "lucide-react";
 import { sortGames, type SortMode } from "@/lib/game-utils";
 import type { AgentTraceEvent, Game, Platform, ReleaseFilter } from "@/lib/types";
 import GameSearchInput from "./GameSearchInput";
@@ -11,11 +11,10 @@ import AgentTracePanel from "./AgentTracePanel";
 
 const RELEASE_OPTIONS: { key: ReleaseFilter; label: string }[] = [
   { key: "all", label: "不限" },
-  { key: "recent", label: "近期（近5年）" },
-  { key: "classic", label: "经典（2020年前）" },
   { key: "last1", label: "近1年" },
   { key: "last3", label: "近3年" },
   { key: "last5", label: "近5年" },
+  { key: "before2020", label: "2020年前" },
   { key: "before2010", label: "2010年前" },
 ];
 
@@ -23,13 +22,13 @@ const PLATFORM_OPTIONS: { key: Platform; label: string; icon: typeof Monitor }[]
   { key: "steam", label: "Steam", icon: Monitor },
   { key: "psn", label: "PSN", icon: Gamepad2 },
   { key: "ns", label: "NS", icon: Gamepad2 },
+  { key: "mobile", label: "\u624B\u6E38", icon: Smartphone },
 ];
 
 const SORT_OPTIONS: { key: SortMode; label: string }[] = [
   { key: "match", label: "匹配度" },
   { key: "rating", label: "评分" },
   { key: "release", label: "最新发售" },
-  { key: "playtime", label: "通关时长" },
   { key: "price", label: "价格" },
 ];
 
@@ -90,7 +89,7 @@ export default function ResultsView({
             AI 游戏推荐
           </span>
         </div>
-        <p className="text-sm text-ink/50">{loading ? "推荐生成中…" : `为你找到 ${games.length} 款游戏`}</p>
+        <p className="text-sm text-ink/50">{loading ? "推荐生成中…" : `累计 ${games.length} 款候选游戏`}</p>
       </header>
 
       <section className="mb-5 rounded-lg border border-ink/10 bg-white p-3 shadow-sm">
@@ -184,30 +183,33 @@ export default function ResultsView({
 
       <AgentTracePanel events={agentTrace} loading={loading} />
 
-      {loading ? (
-        <>
-          <p className="mb-4 flex items-center gap-2 text-sm text-ink/55">
-            <span className="caret-blink inline-block h-3.5 w-2 bg-brand-2-strong" />
-            {LOADING_STEPS[step]}
-          </p>
-          <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
-            {Array.from({ length: count }).map((_, index) => (
-              <div key={index} className="overflow-hidden rounded-lg border border-ink/8 bg-white">
-                <div className="aspect-[460/215] animate-pulse bg-brand-2/15" />
-                <div className="flex flex-col gap-2.5 p-4">
-                  <div className="h-4 w-2/3 animate-pulse rounded bg-ink/10" />
-                  <div className="h-3 w-full animate-pulse rounded bg-ink/8" />
-                  <div className="h-3 w-4/5 animate-pulse rounded bg-ink/8" />
-                  <div className="mt-2 h-3 w-1/2 animate-pulse rounded bg-ink/8" />
-                </div>
-              </div>
-            ))}
-          </div>
-        </>
-      ) : games.length > 0 ? (
+      {loading && (
+        <p className="mb-4 flex items-center gap-2 text-sm text-ink/55">
+          <span className="caret-blink inline-block h-3.5 w-2 bg-brand-2-strong" />
+          {games.length > 0
+            ? `正在生成新的推荐，当前 ${games.length} 款候选仍可继续查看。`
+            : LOADING_STEPS[step]}
+        </p>
+      )}
+
+      {games.length > 0 ? (
         <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {sorted.map((game) => (
             <GameCard key={`${game.source}-${game.id}`} game={game} onSelect={onSelectGame} />
+          ))}
+        </div>
+      ) : loading ? (
+        <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+          {Array.from({ length: count }).map((_, index) => (
+            <div key={index} className="overflow-hidden rounded-lg border border-ink/8 bg-white">
+              <div className="aspect-[460/215] animate-pulse bg-brand-2/15" />
+              <div className="flex flex-col gap-2.5 p-4">
+                <div className="h-4 w-2/3 animate-pulse rounded bg-ink/10" />
+                <div className="h-3 w-full animate-pulse rounded bg-ink/8" />
+                <div className="h-3 w-4/5 animate-pulse rounded bg-ink/8" />
+                <div className="mt-2 h-3 w-1/2 animate-pulse rounded bg-ink/8" />
+              </div>
+            </div>
           ))}
         </div>
       ) : (

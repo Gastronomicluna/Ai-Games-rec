@@ -7,8 +7,8 @@
 | 真实 AI + 真实游戏库推荐 | `lib/recommend.ts`、`lib/ai.ts` | DeepSeek/OpenAI 兼容接口与 Steam 实际请求通过；Wikidata 免认证接口已接入 |
 | Wikidata 主库与 Steam 价格融合 | `lib/wikidata.ts`、`lib/recommend.ts` | Wikidata 客户端已接入，无需账号或 API Key |
 | 每批 6 款 | `lib/recommend.ts` | 真实 Steam 降级接口返回 6 款 |
-| 封面、名称、平台、推荐理由、简介、类型、标签、游玩方式、价格、发布时间、开发商、时长、评分 | `components/GameCard.tsx`、`components/GameModal.tsx` | 桌面端 DOM 与详情弹窗检查通过 |
-| 匹配度、评分、发布时间、通关时长、价格排序 | `lib/game-utils.ts`、`components/ResultsView.tsx` | 5 类排序单元测试通过 |
+| 封面、名称、平台、推荐理由、简介、类型、标签、游玩方式、价格、发布时间、开发商、评分 | `components/GameCard.tsx`、`components/GameModal.tsx` | 桌面端 DOM 与详情弹窗检查通过；按产品决策移除不稳定的通关时长 |
+| 匹配度、评分、发布时间、价格排序 | `lib/game-utils.ts`、`components/ResultsView.tsx` | 4 类排序单元测试通过 |
 | 换一批排除已推荐游戏 | `app/page.tsx`、`lib/recommend.ts` | 真实接口两批结果零重复 |
 | 持续补充需求 | `components/ChatDock.tsx`、`app/page.tsx` | 完整对话发送并重建列表 |
 | 新建对话/重置 | `app/page.tsx` | 清除状态并取消进行中的请求 |

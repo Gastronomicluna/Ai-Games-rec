@@ -10,6 +10,8 @@ export interface ReferenceGameProfile {
   genres: string[];
   playerModes: string[];
   tags: string[];
+  visualStyle: string[];
+  gameplay: string[];
   platforms: string[];
   releaseDate: string | null;
   sources: string[];
@@ -84,6 +86,8 @@ function gameBrainProfile(requestedName: string, game: GameBrainGame | undefined
     genres,
     playerModes: [],
     tags: genres,
+    visualStyle: [],
+    gameplay: [],
     platforms: [],
     releaseDate: game.year ? `${game.year}-01-01` : null,
     sources: ["GameBrain"],
@@ -103,6 +107,8 @@ function steamProfile(requestedName: string, result: { name: string; app: SteamA
     genres,
     playerModes,
     tags,
+    visualStyle: [],
+    gameplay: [],
     platforms,
     releaseDate: app.release_date?.date ?? null,
     sources: ["Steam"],
@@ -117,6 +123,8 @@ function wikidataProfile(requestedName: string, game: WikidataGame | undefined):
     genres: game.genres.slice(0, 8),
     playerModes: game.gameModes.slice(0, 8),
     tags: Array.from(new Set([...game.genres, ...game.gameModes])).slice(0, 12),
+    visualStyle: [],
+    gameplay: [],
     platforms: game.platforms.slice(0, 8),
     releaseDate: game.releaseDate ?? null,
     sources: ["Wikidata"],
@@ -131,18 +139,20 @@ function mergeProfiles(primary: ReferenceGameProfile, secondary: ReferenceGamePr
     genres: Array.from(new Set([...primary.genres, ...secondary.genres])).slice(0, 10),
     playerModes: Array.from(new Set([...primary.playerModes, ...secondary.playerModes])).slice(0, 10),
     tags: Array.from(new Set([...primary.tags, ...secondary.tags])).slice(0, 16),
+    visualStyle: Array.from(new Set([...(primary.visualStyle ?? []), ...(secondary.visualStyle ?? [])])).slice(0, 12),
+    gameplay: Array.from(new Set([...(primary.gameplay ?? []), ...(secondary.gameplay ?? [])])).slice(0, 12),
     platforms: Array.from(new Set([...primary.platforms, ...secondary.platforms])).slice(0, 10),
     releaseDate: primary.releaseDate ?? secondary.releaseDate,
     sources: Array.from(new Set([...primary.sources, ...secondary.sources])),
   };
 }
 
-async function resolveReferenceGames(names: string[]): Promise<ReferenceGameProfile[]> {
+async function resolveReferenceGames(names: string[], includeSteam: boolean): Promise<ReferenceGameProfile[]> {
   const requested = Array.from(new Set(names.map((name) => name.trim()).filter(Boolean))).slice(0, 6);
   if (requested.length === 0) return [];
 
   const [steamSearches, wikidataResults, gameBrainSuggestions] = await Promise.all([
-    Promise.all(requested.map((name) => searchStore(name, 5))),
+    includeSteam ? Promise.all(requested.map((name) => searchStore(name, 5))) : Promise.resolve(requested.map(() => [])),
     searchWikidataBatch(requested.map((query) => ({ query, limit: 2 }))).catch(() => requested.map(() => [] as WikidataGame[])),
     Promise.all(requested.map((name) => suggestGameBrain(name, 5).catch(() => []))),
   ]);
@@ -156,7 +166,8 @@ async function resolveReferenceGames(names: string[]): Promise<ReferenceGameProf
     const steamMatch = steamMatches[index];
     const steamApp = steamMatch ? details.get(steamMatch.id) : undefined;
     const steam = steamMatch && steamApp ? steamProfile(name, { name: steamMatch.name, app: steamApp }) : null;
-    const wiki = wikidataProfile(name, wikidataResults[index]?.find((game) => isNameMatch(name, game.name)));
+    const wikiGames = wikidataResults[index] ?? [];
+    const wiki = wikidataProfile(name, wikiGames.find((game) => isNameMatch(name, game.name)) ?? wikiGames[0]);
     const gameBrain = gameBrainProfile(name, gameBrainSuggestions[index]?.find((game) => isNameMatch(name, game.name)) ?? gameBrainSuggestions[index]?.[0]);
     if (steam) return mergeProfiles(mergeProfiles(steam, gameBrain), wiki);
     if (gameBrain) return mergeProfiles(gameBrain, wiki);
@@ -166,6 +177,8 @@ async function resolveReferenceGames(names: string[]): Promise<ReferenceGameProf
       genres: [],
       playerModes: [],
       tags: [],
+      visualStyle: [],
+      gameplay: [],
       platforms: [],
       releaseDate: null,
       sources: [],
@@ -173,17 +186,18 @@ async function resolveReferenceGames(names: string[]): Promise<ReferenceGameProf
   });
 }
 
-export async function analyzeReferenceGames(names: string[]): Promise<ReferenceGameProfile[]> {
+export async function analyzeReferenceGames(names: string[], options: { includeSteam?: boolean } = {}): Promise<ReferenceGameProfile[]> {
   const requested = Array.from(new Set(names.map((name) => name.trim()).filter(Boolean))).slice(0, 6);
   if (requested.length === 0) return [];
-  const cacheKey = requested.map((name) => normalizeName(name)).join("|");
+  const includeSteam = options.includeSteam !== false;
+  const cacheKey = `v2:${includeSteam ? "steam" : "catalog"}:${requested.map((name) => normalizeName(name)).join("|")}`;
   await ensureProfileCacheLoaded();
   const cached = profileCache.get(cacheKey);
   if (cached && Date.now() - cached.savedAt < PROFILE_CACHE_TTL) return cached.profiles;
 
   const active = profileInFlight.get(cacheKey);
   if (active) return await active;
-  const request = resolveReferenceGames(requested);
+  const request = resolveReferenceGames(requested, includeSteam);
   profileInFlight.set(cacheKey, request);
   try {
     const profiles = await request;
@@ -198,12 +212,16 @@ export function summarizeReferenceProfiles(profiles: ReferenceGameProfile[]): {
   genres: string[];
   playerModes: string[];
   tags: string[];
+  visualStyle: string[];
+  gameplay: string[];
   platforms: string[];
 } {
   return {
     genres: Array.from(new Set(profiles.flatMap((profile) => profile.genres))).slice(0, 12),
     playerModes: Array.from(new Set(profiles.flatMap((profile) => profile.playerModes))).slice(0, 12),
     tags: Array.from(new Set(profiles.flatMap((profile) => profile.tags))).slice(0, 18),
+    visualStyle: Array.from(new Set(profiles.flatMap((profile) => profile.visualStyle ?? []))).slice(0, 12),
+    gameplay: Array.from(new Set(profiles.flatMap((profile) => profile.gameplay ?? []))).slice(0, 12),
     platforms: Array.from(new Set(profiles.flatMap((profile) => profile.platforms))).slice(0, 12),
   };
 }

@@ -169,7 +169,7 @@ async function searchEntities(query: string, count: number): Promise<SearchEntit
     format: "json",
     origin: "*",
   });
-  const data = await fetchJson<WikidataResponse>(`${WIKIDATA_API}?${params.toString()}`);
+  const data = await fetchJson<WikidataResponse>(`${WIKIDATA_API}?${params.toString()}`, 8_000, 1);
   return (data.search ?? []).filter(isLikelyGameResult).slice(0, count);
 }
 
@@ -186,7 +186,7 @@ async function fetchEntities(ids: string[]): Promise<Map<string, EntityData>> {
       format: "json",
       origin: "*",
     });
-    const data = await fetchJson<WikidataResponse>(`${WIKIDATA_API}?${params.toString()}`);
+    const data = await fetchJson<WikidataResponse>(`${WIKIDATA_API}?${params.toString()}`, 10_000, 1);
     for (const [id, entity] of Object.entries(data.entities ?? {})) {
       if (!entity.missing) output.set(id, entity);
     }
@@ -299,7 +299,9 @@ export async function getWikipediaEnrichment(games: WikidataGame[]): Promise<Map
       origin: "*",
     });
     const api = `https://${site}.wikipedia.org/w/api.php?${params.toString()}`;
-    const data = await fetchJson<WikidataResponse>(api);
+    // Wikipedia summaries are optional enrichment; they must not hold the
+    // response for three long retries when an endpoint is slow.
+    const data = await fetchJson<WikidataResponse>(api, 8_000, 0);
     for (const page of Object.values(data.query?.pages ?? {})) {
       const id = titleToId.get(page.title.toLocaleLowerCase());
       if (id) output.set(id, { summary: page.extract, imageUrl: page.thumbnail?.source });

@@ -1,6 +1,6 @@
 "use client";
 
-import { Calendar, Clock3, Monitor, ThumbsUp } from "lucide-react";
+import { Calendar, Monitor, ThumbsUp } from "lucide-react";
 import type { Game } from "@/lib/types";
 
 function formatCount(n: number): string {
@@ -70,10 +70,6 @@ export default function GameCard({ game, onSelect }: { game: Game; onSelect: (g:
           <span className="flex items-center gap-1">
             <Monitor size={13} />
             {platformSummary(game.platformNames)}
-          </span>
-          <span className="flex items-center gap-1">
-            <Clock3 size={13} />
-            {game.playtimeHours === null ? "时长未知" : `约 ${game.playtimeHours} 小时`}
           </span>
         </div>
 

@@ -3,6 +3,7 @@ import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import { searchStore } from "@/lib/steam";
 import { searchWikidata } from "@/lib/wikidata";
+import { isGameBrainConfigured, suggestGameBrain } from "@/lib/gamebrain";
 
 export const runtime = "nodejs";
 
@@ -16,7 +17,7 @@ interface SearchCacheEntry {
   results: SearchResult[];
 }
 
-const CACHE_TTL = Number(process.env.GAME_SEARCH_CACHE_TTL_MS ?? 24 * 60 * 60 * 1000);
+const CACHE_TTL = Number(process.env.GAME_SEARCH_CACHE_TTL_MS ?? 60 * 60 * 1000);
 const CACHE_PATH = process.env.GAME_SEARCH_CACHE_PATH || path.join(process.cwd(), ".cache", "game-search.json");
 const MAX_CACHE_ENTRIES = 2000;
 const DEFAULT_RESULT_LIMIT = 20;
@@ -65,12 +66,21 @@ function saveCache(key: string, results: SearchResult[]): void {
 }
 
 async function searchSources(query: string, limit: number): Promise<SearchResult[]> {
-  const [steamResults, wikidataResults] = await Promise.all([
+  const [gameBrainResults, steamResults, wikidataResults] = await Promise.all([
+    isGameBrainConfigured() ? suggestGameBrain(query, Math.min(limit, 10)).catch(() => []) : [],
     searchStore(query, limit),
     searchWikidata(query, limit).catch(() => []),
   ]);
   const seen = new Set<string>();
   const results: SearchResult[] = [];
+  // Suggest is optimized for title lookup, so show those matches first in the
+  // favorite-game picker. The route cache prevents repeated token spending.
+  for (const game of gameBrainResults) {
+    const key = game.name.toLocaleLowerCase();
+    if (!game.name || seen.has(key)) continue;
+    seen.add(key);
+    results.push({ id: `gamebrain-${game.id}`, name: game.name });
+  }
   for (const result of steamResults) {
     const key = result.name.toLocaleLowerCase();
     if (!result.name || seen.has(key)) continue;

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowRight, Database, Gamepad2, MessagesSquare, Monitor, RefreshCw, Sparkles } from "lucide-react";
+import { ArrowRight, Database, Gamepad2, MessagesSquare, Monitor, RefreshCw, Smartphone, Sparkles } from "lucide-react";
 import type { AgentTraceEvent, Platform, ReleaseFilter } from "@/lib/types";
 import GameSearchInput from "./GameSearchInput";
 import PixelLogo from "./PixelLogo";
@@ -30,11 +30,10 @@ const PIXELS = [
 
 const RELEASE_OPTIONS: { key: ReleaseFilter; label: string }[] = [
   { key: "all", label: "不限" },
-  { key: "recent", label: "近期（近5年）" },
-  { key: "classic", label: "经典（2020年前）" },
   { key: "last1", label: "近1年" },
   { key: "last3", label: "近3年" },
   { key: "last5", label: "近5年" },
+  { key: "before2020", label: "2020年前" },
   { key: "before2010", label: "2010年前" },
 ];
 
@@ -42,6 +41,7 @@ const PLATFORM_OPTIONS: { key: Platform; label: string; icon: typeof Monitor }[]
   { key: "steam", label: "Steam", icon: Monitor },
   { key: "psn", label: "PSN", icon: Gamepad2 },
   { key: "ns", label: "NS", icon: Gamepad2 },
+  { key: "mobile", label: "\u624B\u6E38", icon: Smartphone },
 ];
 
 export default function HomeView({

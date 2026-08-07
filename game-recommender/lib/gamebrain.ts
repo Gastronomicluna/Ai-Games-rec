@@ -2,7 +2,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const API_BASE = "https://api.gamebrain.co/v1";
-const CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
+// GameBrain's terms cap cached API responses at one hour unless separately approved.
+const CACHE_TTL = Number(process.env.GAMEBRAIN_CACHE_TTL_MS ?? 60 * 60 * 1000);
 const MIN_REQUEST_INTERVAL = Number(process.env.GAMEBRAIN_MIN_REQUEST_INTERVAL_MS ?? 1050);
 const CACHE_PATH = process.env.GAMEBRAIN_CACHE_PATH || path.join(process.cwd(), ".cache", "gamebrain.json");
 
@@ -22,6 +23,14 @@ export interface GameBrainGame {
   adult_only?: boolean;
   screenshots?: string[];
   short_description?: string;
+  platforms?: GameBrainNamedValue[];
+  genres?: GameBrainNamedValue[];
+  play_modes?: GameBrainNamedValue[];
+}
+
+export interface GameBrainNamedValue {
+  value: string;
+  name: string;
 }
 
 export interface GameBrainSearchFilter {
@@ -35,6 +44,17 @@ export interface GameBrainSearchOptions {
   sort?: "computed_rating" | "release_date" | "price";
   sortOrder?: "asc" | "desc";
   generateFilterOptions?: boolean;
+  /** Stop as soon as this many raw results are available. */
+  minimumResults?: number;
+  /** Hard request cap for this search. */
+  maxPages?: number;
+  /** Shared conservative Search-token budget across recommendation rounds. */
+  requestBudget?: GameBrainSearchBudget;
+}
+
+export interface GameBrainSearchBudget {
+  remaining: number;
+  used: number;
 }
 
 interface SearchResponse {
@@ -77,10 +97,11 @@ export interface GameBrainCacheStats {
   misses: number;
   inFlightHits: number;
   networkRequests: number;
+  quotaTokens: number;
   failures: number;
 }
 
-const cacheStats: GameBrainCacheStats = { hits: 0, misses: 0, inFlightHits: 0, networkRequests: 0, failures: 0 };
+const cacheStats: GameBrainCacheStats = { hits: 0, misses: 0, inFlightHits: 0, networkRequests: 0, quotaTokens: 0, failures: 0 };
 
 export function gameBrainCacheStats(): GameBrainCacheStats {
   return { ...cacheStats };
@@ -134,7 +155,7 @@ function platformFilters(platformKeys: string[], filters: GameBrainSearchFilter[
   return allFilters.length > 0 ? JSON.stringify(allFilters) : undefined;
 }
 
-async function requestGameBrainEndpoint<T>(url: string, cacheKey: string): Promise<T> {
+async function requestGameBrainEndpoint<T>(url: string, cacheKey: string, quotaCost = 1): Promise<T> {
   if (!isGameBrainConfigured()) throw new GameBrainUnavailableError("??????? GAMEBRAIN_API_KEY");
   await ensureCacheLoaded();
   const cached = cache.get(cacheKey);
@@ -142,7 +163,7 @@ async function requestGameBrainEndpoint<T>(url: string, cacheKey: string): Promi
     cacheStats.hits += 1;
     return cached.data as T;
   }
-  if (quotaLeft !== null && quotaLeft < 1) throw new GameBrainQuotaError();
+  if (quotaLeft !== null && quotaLeft < quotaCost) throw new GameBrainQuotaError();
 
   const active = inFlight.get(cacheKey);
   if (active) {
@@ -161,6 +182,9 @@ async function requestGameBrainEndpoint<T>(url: string, cacheKey: string): Promi
         headers: { "x-api-key": process.env.GAMEBRAIN_API_KEY!, "User-Agent": "WanShenMe/1.0", Accept: "application/json" },
         signal: controller.signal,
       });
+      const chargedHeader = response.headers.get("x-api-quota-request");
+      const charged = chargedHeader === null ? Number.NaN : Number(chargedHeader);
+      cacheStats.quotaTokens += Number.isFinite(charged) ? charged : quotaCost;
       const left = Number(response.headers.get("x-api-quota-left"));
       if (Number.isFinite(left)) quotaLeft = left;
       if (response.status === 402) throw new GameBrainQuotaError();
@@ -198,7 +222,7 @@ async function searchPage(query: string, platformKeys: string[], offset: number,
 }
 
 const SEARCH_PAGE_SIZE = 10;
-const MAX_SEARCH_PAGES = 4;
+const MAX_SEARCH_PAGES = 2;
 
 export async function searchGameBrain(
   query: string,
@@ -207,14 +231,22 @@ export async function searchGameBrain(
   offset = 0,
   options: GameBrainSearchOptions = {}
 ): Promise<GameBrainGame[]> {
-  const target = Math.max(1, Math.min(candidateCount, SEARCH_PAGE_SIZE * MAX_SEARCH_PAGES));
+  const maxPages = Math.max(1, Math.min(MAX_SEARCH_PAGES, options.maxPages ?? MAX_SEARCH_PAGES));
+  const target = Math.max(1, Math.min(candidateCount, SEARCH_PAGE_SIZE * maxPages));
+  const minimumResults = Math.max(1, Math.min(target, options.minimumResults ?? target));
   const results: GameBrainGame[] = [];
   let nextOffset = offset;
-  for (let page = 0; page < MAX_SEARCH_PAGES && results.length < target; page++) {
+  for (let page = 0; page < maxPages && results.length < target; page++) {
+    if (options.requestBudget && options.requestBudget.remaining < 1) break;
+    if (options.requestBudget) {
+      options.requestBudget.remaining -= 1;
+      options.requestBudget.used += 1;
+    }
     const data = await searchPage(query, platformKeys, nextOffset, SEARCH_PAGE_SIZE, options);
     const pageResults = data.results ?? [];
     results.push(...pageResults);
     if (pageResults.length === 0) break;
+    if (results.length >= minimumResults) break;
 
     // Some deployments cap the requested page size. Prefer the API's reported
     // limit/total so we can still paginate correctly without wasting a request.
@@ -238,7 +270,8 @@ export async function suggestGameBrain(query: string, limit = 5): Promise<GameBr
   const params = new URLSearchParams({ query: trimmed, limit: String(Math.max(1, Math.min(10, limit))) });
   const data = await requestGameBrainEndpoint<{ results?: GameBrainGame[] }>(
     `${API_BASE}/games/suggestions?${params.toString()}`,
-    `suggestions:${params.toString()}`
+    `suggestions:${params.toString()}`,
+    0.1
   );
   return (data.results ?? []).filter((game) => game.id > 0 && game.name).slice(0, limit);
 }

@@ -65,7 +65,9 @@ export default function GameSearchInput({
   }, [chips]);
 
   useEffect(() => {
-    const timer = setTimeout(() => search(query), 200);
+    // A slightly longer debounce avoids spending Suggest quota while the user
+    // is still typing rapidly; exact repeats are cached client- and server-side.
+    const timer = setTimeout(() => search(query), 350);
     return () => clearTimeout(timer);
   }, [query, search]);
 

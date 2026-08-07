@@ -1,9 +1,10 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
 import { recommend } from "@/lib/recommend";
+import { normalizeReleaseFilter } from "@/lib/recommend-preferences";
 import type { AgentTraceEvent, ChatMessage, Platform, PreviousRecommendation, ReleaseFilter } from "@/lib/types";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 function isChatMessage(value: unknown): value is ChatMessage {
   if (!value || typeof value !== "object") return false;
@@ -44,18 +45,18 @@ export async function POST(request: NextRequest) {
 
   const platforms: Platform[] = (
     Array.isArray(body.platforms)
-      ? body.platforms.filter((v): v is Platform => v === "steam" || v === "psn" || v === "ns")
+      ? body.platforms.filter((v): v is Platform => v === "steam" || v === "psn" || v === "ns" || v === "mobile")
       : []
   );
 
-  const releaseFilter: ReleaseFilter = body.releaseFilter === "recent" || body.releaseFilter === "classic" || body.releaseFilter === "last1" || body.releaseFilter === "last3" || body.releaseFilter === "last5" || body.releaseFilter === "before2020" || body.releaseFilter === "before2010" ? body.releaseFilter : "all";
+  const releaseFilter: ReleaseFilter = normalizeReleaseFilter(body.releaseFilter);
 
   const excludeIds = Array.isArray(body.excludeIds)
     ? body.excludeIds.filter((value): value is number => Number.isInteger(value) && value > 0).slice(-200)
     : [];
 
   const excludeKeys = Array.isArray(body.excludeKeys)
-    ? body.excludeKeys.filter((value): value is string => typeof value === "string" && /^(gamebrain|wikidata|steam):\d+$/.test(value)).slice(-200)
+    ? body.excludeKeys.filter((value): value is string => typeof value === "string" && /^(gamebrain|wikidata|steam|web):\d+$/.test(value)).slice(-200)
     : [];
 
   const favoriteGames = Array.isArray(body.favoriteGames)

@@ -5,6 +5,8 @@ import ChatDock from "@/components/ChatDock";
 import GameModal from "@/components/GameModal";
 import HomeView from "@/components/HomeView";
 import ResultsView from "@/components/ResultsView";
+import { updateRecommendationPool } from "@/lib/game-utils";
+import { normalizeReleaseFilter } from "@/lib/recommend-preferences";
 import type { AgentTraceEvent, ChatMessage, Game, Platform, PreviousRecommendation, RecommendResponse, ReleaseFilter } from "@/lib/types";
 
 const STORAGE_KEY = "wanshenme-session-v3";
@@ -12,6 +14,7 @@ const STORAGE_KEY = "wanshenme-session-v3";
 interface SessionState {
   messages: ChatMessage[];
   games: Game[];
+  candidateGames?: Game[];
   excludedIds: number[];
   excludedKeys?: string[];
   platforms: Platform[];
@@ -45,17 +48,18 @@ function loadSession(): SessionState | null {
         typeof message.content === "string"
     );
     const games = Array.isArray(parsed.games) ? parsed.games.filter(isStoredGame) : [];
+    const candidateGames = Array.isArray(parsed.candidateGames) ? parsed.candidateGames.filter(isStoredGame).slice(0, 120) : games;
       const platforms = Array.isArray(parsed.platforms)
-    ? parsed.platforms.filter((p): p is Platform => p === "steam" || p === "psn" || p === "ns")
+    ? parsed.platforms.filter((p): p is Platform => p === "steam" || p === "psn" || p === "ns" || p === "mobile")
     : [];
   const excludedIds = Array.isArray(parsed.excludedIds)
     ? parsed.excludedIds.filter((id): id is number => Number.isInteger(id) && id > 0)
     : [];
   if (messages.length === 0) return null;
   const excludedKeys = Array.isArray(parsed.excludedKeys)
-    ? parsed.excludedKeys.filter((key): key is string => typeof key === "string" && /^(gamebrain|wikidata|steam):\d+$/.test(key)).slice(-200)
+    ? parsed.excludedKeys.filter((key): key is string => typeof key === "string" && /^(gamebrain|wikidata|steam|web):\d+$/.test(key)).slice(-200)
     : [];
-  return { messages, games, excludedIds, excludedKeys, platforms, favoriteGames: Array.isArray(parsed.favoriteGames) ? parsed.favoriteGames.filter((value): value is string => typeof value === "string").slice(0, 8) : [], releaseFilter: parsed.releaseFilter === "recent" || parsed.releaseFilter === "classic" || parsed.releaseFilter === "last1" || parsed.releaseFilter === "last3" || parsed.releaseFilter === "last5" || parsed.releaseFilter === "before2020" || parsed.releaseFilter === "before2010" ? parsed.releaseFilter : "all", count: typeof parsed.count === "number" ? parsed.count : 6 };
+  return { messages, games, candidateGames, excludedIds, excludedKeys, platforms, favoriteGames: Array.isArray(parsed.favoriteGames) ? parsed.favoriteGames.filter((value): value is string => typeof value === "string").slice(0, 8) : [], releaseFilter: normalizeReleaseFilter(parsed.releaseFilter), count: typeof parsed.count === "number" ? parsed.count : 6 };
   } catch {
     return null;
   }
@@ -67,6 +71,9 @@ export default function Page() {
   const [games, setGames] = useState<Game[]>([]);
   const gamesRef = useRef(games);
   gamesRef.current = games;
+  const [candidateGames, setCandidateGames] = useState<Game[]>([]);
+  const candidateGamesRef = useRef(candidateGames);
+  candidateGamesRef.current = candidateGames;
   const [excludedIds, setExcludedIds] = useState<number[]>([]);
   const [excludedKeys, setExcludedKeys] = useState<string[]>([]);
   const excludedKeysRef = useRef(excludedKeys);
@@ -95,7 +102,11 @@ export default function Page() {
     const session = loadSession();
     if (session) {
       setMessages(session.messages);
-      setGames(session.games);
+      const restoredCount = session.count ?? 6;
+      const restoredCandidates = session.candidateGames ?? session.games;
+      setGames(session.games.slice(0, restoredCount));
+      setCandidateGames(restoredCandidates);
+      candidateGamesRef.current = restoredCandidates;
             setExcludedIds(session.excludedIds);
       setExcludedKeys(session.excludedKeys ?? session.games.map((game) => `${game.source}:${game.id}`));
       setPlatforms(session.platforms ?? []);
@@ -113,9 +124,9 @@ export default function Page() {
     if (messages.length === 0) {
       localStorage.removeItem(STORAGE_KEY);
     } else {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ messages, games, excludedIds, excludedKeys, platforms, favoriteGames, releaseFilter, count }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ messages, games, candidateGames, excludedIds, excludedKeys, platforms, favoriteGames, releaseFilter, count }));
     }
-  }, [messages, games, excludedIds, excludedKeys, platforms, favoriteGames, releaseFilter, count, hydrated]);
+  }, [messages, games, candidateGames, excludedIds, excludedKeys, platforms, favoriteGames, releaseFilter, count, hydrated]);
 
   const requestRecommend = useCallback(
     async (
@@ -123,7 +134,8 @@ export default function Page() {
       nextExcluded: number[],
       appendExcluded: boolean,
       rollbackMessages?: ChatMessage[],
-      contextGames: Game[] = []
+      contextGames: Game[] = [],
+      resultMode: "replace" | "merge" = "replace"
     ): Promise<boolean> => {
       abortRef.current?.abort();
       const controller = new AbortController();
@@ -191,18 +203,35 @@ export default function Page() {
           result = await response.json() as RecommendResponse;
         }
         if (!result) throw new Error("Recommendation stream returned no result");
-        if (!Array.isArray(result.games) || result.games.length === 0) {
+        if (requestVersion !== requestVersionRef.current) return false;
+        if (!Array.isArray(result.games)) {
           throw new Error("No suitable games found for this request.");
         }
-        if (requestVersion !== requestVersionRef.current) return false;
+        if (result.games.length === 0) {
+          if (resultMode === "merge" && gamesRef.current.length > 0) {
+            setMessages([...nextMessages, { role: "assistant", content: result.reply }]);
+            setView("results");
+            return true;
+          }
+          throw new Error(result.reply || "No suitable games found for this request.");
+        }
 
-        setGames(result.games);
+        const poolUpdate = updateRecommendationPool(
+          resultMode === "merge" ? candidateGamesRef.current : [],
+          result.games,
+          countRef.current
+        );
+        const nextGames = poolUpdate.visible;
+        candidateGamesRef.current = poolUpdate.candidates;
+        setCandidateGames(poolUpdate.candidates);
+        gamesRef.current = nextGames;
+        setGames(nextGames);
         setMessages([...nextMessages, { role: "assistant", content: result.reply }]);
-        const batchIds = result.games.map((game) => game.id);
-        const batchKeys = result.games.map((game) => `${game.source}:${game.id}`);
-        const nextKeys = appendExcluded ? Array.from(new Set([...excludedKeysRef.current, ...batchKeys])) : batchKeys;
+        const visibleIds = nextGames.map((game) => game.id);
+        const visibleKeys = nextGames.map((game) => `${game.source}:${game.id}`);
+        const nextKeys = appendExcluded ? Array.from(new Set([...excludedKeysRef.current, ...visibleKeys])) : visibleKeys;
         excludedKeysRef.current = nextKeys;
-        setExcludedIds(appendExcluded ? Array.from(new Set([...nextExcluded, ...batchIds])) : batchIds);
+        setExcludedIds(appendExcluded ? Array.from(new Set([...nextExcluded, ...visibleIds])) : visibleIds);
         setExcludedKeys(nextKeys);
         setView("results");
         return true;
@@ -225,13 +254,13 @@ export default function Page() {
     async (text: string) => {
       const nextMessages: ChatMessage[] = [...messages, { role: "user", content: text }];
       setMessages(nextMessages);
-      return requestRecommend(nextMessages, [], false, messages, gamesRef.current);
+      return requestRecommend(nextMessages, [], false, messages, candidateGamesRef.current, "merge");
     },
     [messages, requestRecommend]
   );
 
   const handleRefreshBatch = useCallback(() => {
-    void requestRecommend(messages, excludedIds, true, undefined, gamesRef.current);
+    void requestRecommend(messages, excludedIds, true, undefined, candidateGamesRef.current);
   }, [messages, excludedIds, requestRecommend]);
 
   const handleApplyPreferences = useCallback((nextFavorites: string[], nextPlatforms: Platform[], nextReleaseFilter: ReleaseFilter) => {
@@ -250,7 +279,7 @@ export default function Page() {
     setReleaseFilter(nextReleaseFilter);
     setFavoriteGames(nextFavorites);
     setMessages(nextMessages);
-    void requestRecommend(nextMessages, [], false, messages, gamesRef.current);
+    void requestRecommend(nextMessages, [], false, messages, candidateGamesRef.current, "merge");
   }, [messages, requestRecommend]);
 
   const handleReset = useCallback(() => {
@@ -259,6 +288,8 @@ export default function Page() {
     abortRef.current = null;
     setMessages([]);
     setGames([]);
+    setCandidateGames([]);
+    candidateGamesRef.current = [];
         setExcludedIds([]);
     setExcludedKeys([]);
     excludedKeysRef.current = [];
@@ -286,7 +317,7 @@ export default function Page() {
               loading={loading}
               error={error}
               count={count}
-              onCountChange={(c: number) => { countRef.current = c; setCount(c); void requestRecommend(messages, excludedIds, true, undefined, gamesRef.current); }}
+              onCountChange={(c: number) => { countRef.current = c; setCount(c); void requestRecommend(messages, excludedIds, true, undefined, candidateGamesRef.current, "merge"); }}
               favoriteGames={favoriteGames}
               onFavoriteGamesChange={setFavoriteGames}
               platforms={platforms}

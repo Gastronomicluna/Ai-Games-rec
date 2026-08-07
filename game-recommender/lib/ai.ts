@@ -9,6 +9,9 @@ interface ChatOptions {
   maxTokens?: number;
   temperature?: number;
   model?: string;
+  timeoutMs?: number;
+  maxAttempts?: number;
+  jsonAttempts?: number;
 }
 
 export interface AiUsageStats {
@@ -96,10 +99,11 @@ export async function chatCompletion(messages: RelayMessage[], opts: ChatOptions
 
   let maxTokens = opts.maxTokens ?? 4000;
   let lastError: unknown;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const attemptCount = Math.max(1, Math.min(3, opts.maxAttempts ?? 2));
+  for (let attempt = 0; attempt < attemptCount; attempt++) {
     if (attempt > 0) usageStats.retries += 1;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 90_000);
+    const timer = setTimeout(() => controller.abort(), Math.max(5_000, opts.timeoutMs ?? 90_000));
     try {
       usageStats.requests += 1;
       const response = await fetch(`${baseUrl}/v1/chat/completions`, {
@@ -121,7 +125,7 @@ export async function chatCompletion(messages: RelayMessage[], opts: ChatOptions
         usageStats.failures += 1;
         const text = await response.text().catch(() => "");
         const error = new Error(`AI 接口错误 ${response.status}: ${text.slice(0, 200)}`);
-        if ((response.status === 408 || response.status === 429 || response.status >= 500) && attempt === 0) {
+        if ((response.status === 408 || response.status === 429 || response.status >= 500) && attempt < attemptCount - 1) {
           lastError = error;
           await sleep(800);
           continue;
@@ -136,7 +140,7 @@ export async function chatCompletion(messages: RelayMessage[], opts: ChatOptions
 
       const finishReason: string | undefined = data?.choices?.[0]?.finish_reason;
       lastError = new Error(`AI 返回了空内容${finishReason ? `（finish_reason=${finishReason}）` : ""}`);
-      if (attempt === 0) {
+      if (attempt < attemptCount - 1) {
         maxTokens = Math.max(maxTokens + 800, Math.ceil(maxTokens * 1.6));
         await sleep(400);
         continue;
@@ -144,7 +148,7 @@ export async function chatCompletion(messages: RelayMessage[], opts: ChatOptions
     } catch (error) {
       lastError = error;
       if (!(error instanceof Error && error.message.startsWith("AI ????"))) usageStats.failures += 1;
-      if (attempt === 0 && (!(error instanceof Error) || error.name === "AbortError" || /fetch|network|timeout/i.test(error.message))) {
+      if (attempt < attemptCount - 1 && (!(error instanceof Error) || error.name === "AbortError" || /fetch|network|timeout/i.test(error.message))) {
         await sleep(800);
         continue;
       }
@@ -160,7 +164,8 @@ export async function chatCompletion(messages: RelayMessage[], opts: ChatOptions
 
 export async function chatCompletionJson<T>(messages: RelayMessage[], opts: ChatOptions = {}): Promise<T> {
   let lastError: unknown;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const attemptCount = Math.max(1, Math.min(3, opts.jsonAttempts ?? 2));
+  for (let attempt = 0; attempt < attemptCount; attempt++) {
     const output = await chatCompletion(messages, {
       ...opts,
       maxTokens: attempt === 0 ? opts.maxTokens : Math.max((opts.maxTokens ?? 4000) + 800, Math.ceil((opts.maxTokens ?? 4000) * 1.5)),
@@ -170,7 +175,7 @@ export async function chatCompletionJson<T>(messages: RelayMessage[], opts: Chat
       return extractJson<T>(output);
     } catch (error) {
       lastError = error;
-      if (attempt === 0) {
+      if (attempt < attemptCount - 1) {
         usageStats.jsonRetries += 1;
         continue;
       }

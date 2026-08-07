@@ -66,10 +66,23 @@ flowchart TD
 GameBrain 是主要的游戏目录和语义检索来源，当前使用：
 
 - Search Games：语义搜索、分页、平台过滤、发售时间排序
-- Suggest Games：识别用户输入的具体游戏标题
-- Similar Games：扩展参考游戏的相似作品
+- Suggest Games：用于喜好游戏输入框的低成本标题联想，并识别具体游戏标题
+- Similar Games：仅在用户从网页选择了喜好游戏时扩展相似作品
 
-GameBrain 搜索遵守接口的分页上限，每页最多 10 个结果，并通过 .cache/gamebrain.json 做持久化缓存。
+Agent 可以在候选数量或多样性不足时执行多轮 Search。每轮只使用一个搜索词、最多两页，所有轮次共享默认 5 tokens 的硬预算；候选充足时会提前结束。选择网页喜好游戏时，会从这 5 tokens 中为 Similar 预留每款 1 token，因此 Search 可用额度相应减少。不会调用 Game Detail。响应通过 .cache/gamebrain.json 按官方条款允许的 1 小时上限持久化缓存。
+
+### 联网搜索
+
+Agent 支持受控的 `web` 搜索策略，用于数据库候选不足、多样性较差或参考游戏的相似性证据不足时发现新候选。网页中提取出的游戏名称必须再经过 Steam 或 Wikidata 验证，未经验证的标题不会进入推荐列表。最终详情弹窗会显示最多 3 个联网参考来源。
+
+当前内置两个可替换 Provider：
+
+| Provider | 环境变量 | 特点 |
+|---|---|---|
+| Tavily（默认优先） | `TAVILY_API_KEY` | 面向 Agent 的结构化摘要；使用 `basic` 深度，每次 1 credit |
+| Brave Search | `BRAVE_SEARCH_API_KEY` | 独立搜索索引、标准网页结果；通过 `X-Subscription-Token` 鉴权 |
+
+若两个 Key 都存在，可用 `WEB_SEARCH_PROVIDER=tavily` 或 `WEB_SEARCH_PROVIDER=brave` 明确选择。每次推荐默认最多 2 次联网搜索。搜索响应默认不持久化；只有确认所购 Provider 套餐允许缓存时才应配置 `WEB_SEARCH_CACHE_TTL_MS`。
 
 ### Steam
 
@@ -102,9 +115,10 @@ Wikipedia 主要用于最终选中游戏的简介和图片补全，不作为唯�
 
 | 缓存 | 默认 TTL | 位置/范围 |
 |---|---:|---|
-| GameBrain Search / Suggest / Similar | 7 天 | .cache/gamebrain.json |
+| GameBrain Search / Suggest / Similar | 1 小时 | .cache/gamebrain.json |
+| 联网搜索 | 默认关闭缓存 | 当前 Node 进程内存（仅套餐允许时开启） |
 | Steam 搜索、详情、评价 | 6 小时 | .cache/steam.json |
-| 喜好游戏搜索 | 24 小时 | .cache/game-search.json |
+| 喜好游戏搜索 | 1 小时 | .cache/game-search.json |
 | 参考游戏画像 | 7 天 | .cache/reference-profiles.json |
 | Agent 决策 | 15 分钟 | 当前 Node 进程内存 |
 | 最终排序 | 5 分钟 | 当前 Node 进程内存 |
@@ -185,6 +199,14 @@ AI_FAST_MODEL=deepseek-v4-flash
 
 # GameBrain API
 GAMEBRAIN_API_KEY=
+
+# Optional controlled web search (choose one)
+WEB_SEARCH_PROVIDER=tavily
+TAVILY_API_KEY=
+# BRAVE_SEARCH_API_KEY=
+WEB_SEARCH_MAX_REQUESTS=6
+WEB_SEARCH_CACHE_TTL_MS=0
+WEB_EXTRACTION_MAX_TOKENS=8000
 ~~~
 
 启动开发服务器：
@@ -207,7 +229,7 @@ http://localhost:3000
 RECOMMEND_QUALITY=deep
 ~~~
 
-deep 模式会使用更大的实体提取、Agent 规划和最终排序预算，并进行一次最终质量复核。
+deep 模式会使用更大的 Agent 规划和最终排序预算。默认在首轮候选充足时立即进入排序，不再重复搜索。
 
 如果更关注响应速度，可以使用：
 
@@ -218,20 +240,29 @@ RECOMMEND_QUALITY=balanced
 调整 Agent 轮数：
 
 ~~~env
-RECOMMEND_MAX_AGENT_TURNS=4
+RECOMMEND_MAX_AGENT_TURNS=3
 ~~~
 
-允许范围为 2～5。
+允许范围为 2～4。仅在需要额外质量复核时开启：
+
+~~~env
+RECOMMEND_ENABLE_REVIEW=true
+~~~
 
 ### 可选缓存配置
 
 ~~~env
 GAMEBRAIN_CACHE_PATH=.cache/gamebrain.json
+GAMEBRAIN_CACHE_TTL_MS=3600000
 GAMEBRAIN_MIN_REQUEST_INTERVAL_MS=1050
+GAMEBRAIN_RECOMMENDATION_TOKEN_BUDGET=5
+WEB_SEARCH_MAX_REQUESTS=6
+WEB_SEARCH_CACHE_TTL_MS=0
+WEB_EXTRACTION_MAX_TOKENS=8000
 STEAM_CACHE_PATH=.cache/steam.json
 STEAM_CACHE_TTL_MS=21600000
 GAME_SEARCH_CACHE_PATH=.cache/game-search.json
-GAME_SEARCH_CACHE_TTL_MS=86400000
+GAME_SEARCH_CACHE_TTL_MS=3600000
 REFERENCE_PROFILE_CACHE_PATH=.cache/reference-profiles.json
 REFERENCE_PROFILE_CACHE_TTL_MS=604800000
 ~~~
@@ -261,7 +292,7 @@ Accept: text/event-stream
 
 ### GET /api/search-games
 
-喜好游戏自动补全接口，使用 Steam + Wikidata，并带有前端、内存和磁盘缓存。
+喜好游戏自动补全接口，使用低成本 GameBrain Suggest，并由 Steam + Wikidata 补充；带有前端、内存和磁盘缓存。
 
 ~~~text
 /api/search-games?q=Hades&limit=20
@@ -302,6 +333,7 @@ lib/
                      意图、实体、发布时间和新鲜度解析
   game-knowledge.ts  参考游戏联网画像和画像缓存
   gamebrain.ts       GameBrain 客户端、分页、Suggest、Similar、缓存和限流
+  web-search.ts      Tavily / Brave 联网搜索、结果清洗和请求限制
   steam.ts           Steam 搜索、详情、评价、缓存和同名校验
   wikidata.ts        Wikidata / Wikipedia 数据客户端和缓存
   ai.ts              OpenAI 兼容接口、重试和 Token 指标
@@ -316,6 +348,7 @@ tests/
                      Agent 工具链集成测试
   ai.test.mjs        LLM 重试和 Token 指标
   gamebrain.test.mjs GameBrain 分页、Suggest、Similar、缓存
+  web-search.test.mjs Tavily / Brave 鉴权、结果清洗和并发合并
   llm-cache.test.mjs LLM 缓存和并发合并
   recommend-intent.test.mjs
                      意图、发布时间和标题归一化

@@ -1,4 +1,4 @@
-export type Platform = "steam" | "psn" | "ns";
+export type Platform = "steam" | "psn" | "ns" | "mobile";
 export type ReleaseFilter = "all" | "recent" | "classic" | "last1" | "last3" | "last5" | "before2020" | "before2010";
 
 export interface ChatMessage {
@@ -21,7 +21,7 @@ export interface GameReview {
 
 export interface Game {
   id: number;
-  source: "gamebrain" | "wikidata" | "steam" | "rawg";
+  source: "gamebrain" | "wikidata" | "steam" | "web" | "rawg";
   steamAppId: number | null;
   name: string;
   headerImage: string;
@@ -39,9 +39,9 @@ export interface Game {
   platforms: { windows: boolean; mac: boolean; linux: boolean };
   metacritic: number | null;
   review: GameReview | null;
-  playtimeHours: number | null;
   storeUrl: string;
   storeName: string;
+  webSources?: { title: string; url: string; domain: string }[];
 }
 
 
